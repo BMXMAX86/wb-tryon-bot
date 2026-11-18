@@ -3,7 +3,7 @@
     "id": 1,
     "name": "Топ спортивный с чашками (белый)",
     "article": "982153895",
-    "photo_url": "https://basket-18.wbbasket.ru/vol9821/part982153/982153895/images/big/1.webp",
+    "photos": [1, 2, 3],
     "category": "Топы",
     "size_table": [
       {"intl": "S",   "ru": 42, "chest_min": 80, "chest_max": 86, "waist_min": 66, "waist_max": 69},
@@ -17,7 +17,7 @@
     "id": 2,
     "name": "Спортивный топ-бра с чашками (чёрный)",
     "article": "1594452249",
-    "photo_url": "https://basket-18.wbbasket.ru/vol15944/part1594452/1594452249/images/big/1.webp",
+    "photos": [1, 2, 3],
     "category": "Топы",
     "size_table": [
       {"intl": "S",   "ru": 42, "chest_min": 80, "chest_max": 86, "waist_min": 66, "waist_max": 69},
@@ -31,7 +31,7 @@
     "id": 3,
     "name": "Топ с открытой спиной на бретелях (крест чёрный)",
     "article": "1800510432",
-    "photo_url": "https://basket-18.wbbasket.ru/vol18005/part1800510/1800510432/images/big/1.webp",
+    "photos": [1, 2, 3],
     "category": "Топы",
     "size_table": [
       {"intl": "S",   "ru": 42, "chest_min": 80, "chest_max": 86, "waist_min": 66, "waist_max": 69},
@@ -45,7 +45,7 @@
     "id": 4,
     "name": "Топ спортивный с чашками (розовый)",
     "article": "698949373",
-    "photo_url": "https://basket-18.wbbasket.ru/vol6989/part698949/698949373/images/big/1.webp",
+    "photos": [1, 2, 3],
     "category": "Топы",
     "size_table": [
       {"intl": "S",   "ru": 42, "chest_min": 80, "chest_max": 86, "waist_min": 66, "waist_max": 69},
@@ -59,7 +59,7 @@
     "id": 5,
     "name": "Топ спортивный с чашками (чёрный)",
     "article": "524503923",
-    "photo_url": "https://basket-18.wbbasket.ru/vol5245/part524503/524503923/images/big/1.webp",
+    "photos": [1, 2, 3],
     "category": "Топы",
     "size_table": [
       {"intl": "S",   "ru": 42, "chest_min": 80, "chest_max": 86, "waist_min": 66, "waist_max": 69},
@@ -73,7 +73,7 @@
     "id": 6,
     "name": "Топ с открытой спиной на бретелях (крест белый)",
     "article": "1800510431",
-    "photo_url": "https://basket-18.wbbasket.ru/vol18005/part1800510/1800510431/images/big/1.webp",
+    "photos": [1, 2, 3],
     "category": "Топы",
     "size_table": [
       {"intl": "S",   "ru": 42, "chest_min": 80, "chest_max": 86, "waist_min": 66, "waist_max": 69},
@@ -87,7 +87,7 @@
     "id": 7,
     "name": "Топ с чашками халтер (чёрный)",
     "article": "1800510433",
-    "photo_url": "https://basket-18.wbbasket.ru/vol18005/part1800510/1800510433/images/big/1.webp",
+    "photos": [1, 2, 3],
     "category": "Топы",
     "size_table": [
       {"intl": "S",   "ru": 42, "chest_min": 80, "chest_max": 86, "waist_min": 66, "waist_max": 69},
@@ -101,7 +101,7 @@
     "id": 8,
     "name": "Топ спортивный (новинка)",
     "article": "1562145853",
-    "photo_url": "https://basket-18.wbbasket.ru/vol15621/part1562145/1562145853/images/big/1.webp",
+    "photos": [1, 2, 3],
     "category": "Топы",
     "size_table": [
       {"intl": "S",   "ru": 42, "chest_min": 80, "chest_max": 86, "waist_min": 66, "waist_max": 69},
