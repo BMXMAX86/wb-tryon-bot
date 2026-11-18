@@ -243,30 +243,21 @@ async def send_catalog(update_or_message, context, is_callback=False):
     await bot.send_message(chat_id=chat_id, text="👇 Выбери товар — нажми *Примерить* под карточкой:", parse_mode="Markdown")
 
     for p in products:
-        article = p["article"]
-        wb_url  = f"https://www.wildberries.ru/catalog/{article}/detail.aspx"
-        keyboard = InlineKeyboardMarkup([
+        article   = p["article"]
+        photo_url = p.get("photo_url", "")
+        wb_url    = f"https://www.wildberries.ru/catalog/{article}/detail.aspx"
+        keyboard  = InlineKeyboardMarkup([
             [InlineKeyboardButton("👗 Примерить", callback_data=f"product_{p['id']}")],
             [InlineKeyboardButton("🛒 Купить на WB", url=wb_url)],
         ])
         caption = f"*{p['name']}*"
 
-        # Пробуем все возможные номера basket и форматы изображений
-        vol  = int(article) // 100000
-        part = int(article) // 1000
-        basket = get_basket_number(vol)
-
         sent = False
-        for ext in ["webp", "jpg"]:
-            img_url = (
-                f"https://basket-{basket:02d}.wbbasket.ru"
-                f"/vol{vol}/part{part}/{article}/images/big/1.{ext}"
-            )
+        if photo_url:
             try:
-                img_resp = requests.get(img_url, headers={
+                img_resp = requests.get(photo_url, headers={
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
                     "Referer": "https://www.wildberries.ru/",
-                    "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
                 }, timeout=10)
                 if img_resp.status_code == 200 and len(img_resp.content) > 1000:
                     await bot.send_photo(
@@ -277,9 +268,8 @@ async def send_catalog(update_or_message, context, is_callback=False):
                         reply_markup=keyboard
                     )
                     sent = True
-                    break
             except Exception as e:
-                logger.error(f"Ошибка фото {article} ({ext}): {e}")
+                logger.error(f"Ошибка фото {article}: {e}")
 
         if not sent:
             await bot.send_message(
@@ -294,23 +284,20 @@ async def send_catalog(update_or_message, context, is_callback=False):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
 
-    # Приветственное фото бренда — скачиваем с правильными заголовками
+    # Приветственное фото — берём из первого товара в products.json
     cover_img = None
-    for ext in ["webp", "jpg"]:
-        vol    = int(BRAND_COVER_ARTICLE) // 100000
-        part   = int(BRAND_COVER_ARTICLE) // 1000
-        basket = get_basket_number(vol)
-        url    = f"https://basket-{basket:02d}.wbbasket.ru/vol{vol}/part{part}/{BRAND_COVER_ARTICLE}/images/big/1.{ext}"
-        try:
-            r = requests.get(url, headers={
+    try:
+        first_product = load_products()[0]
+        cover_url = first_product.get("photo_url", "")
+        if cover_url:
+            r = requests.get(cover_url, headers={
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
                 "Referer": "https://www.wildberries.ru/",
             }, timeout=10)
             if r.status_code == 200 and len(r.content) > 1000:
                 cover_img = r.content
-                break
-        except Exception:
-            pass
+    except Exception:
+        pass
 
     welcome_text = (
         "👋 Привет! Я бот бренда *Easy Style*.\n\n"
