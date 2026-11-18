@@ -1,0 +1,39 @@
+[
+  {
+    "id": 1,
+    "name": "Топ спортивный бежевый",
+    "article": "12345678",
+    "category": "Топы",
+    "size_table": [
+      {"intl": "S",   "ru": 42, "chest_min": 80, "chest_max": 86, "waist_min": 66, "waist_max": 69},
+      {"intl": "M",   "ru": 44, "chest_min": 86, "chest_max": 90, "waist_min": 70, "waist_max": 73},
+      {"intl": "L",   "ru": 46, "chest_min": 90, "chest_max": 96, "waist_min": 74, "waist_max": 77},
+      {"intl": "XL",  "ru": 48, "chest_min": 96, "chest_max": 99, "waist_min": 78, "waist_max": 81},
+      {"intl": "XXL", "ru": 50, "chest_min": 99, "chest_max": 103,"waist_min": 82, "waist_max": 85}
+    ]
+  },
+  {
+    "id": 2,
+    "name": "Платье летнее",
+    "article": "87654321",
+    "category": "Платья",
+    "size_table": [
+      {"intl": "XS",  "ru": 40, "chest_min": 76, "chest_max": 80, "waist_min": 58, "waist_max": 62},
+      {"intl": "S",   "ru": 42, "chest_min": 80, "chest_max": 84, "waist_min": 62, "waist_max": 66},
+      {"intl": "M",   "ru": 44, "chest_min": 84, "chest_max": 88, "waist_min": 66, "waist_max": 70},
+      {"intl": "L",   "ru": 46, "chest_min": 88, "chest_max": 92, "waist_min": 70, "waist_max": 74},
+      {"intl": "XL",  "ru": 48, "chest_min": 92, "chest_max": 96, "waist_min": 74, "waist_max": 78},
+      {"intl": "XXL", "ru": 50, "chest_min": 96, "chest_max": 100,"waist_min": 78, "waist_max": 82}
+    ]
+  },
+  {
+    "id": 3,
+    "name": "Кардиган оверсайз",
+    "article": "11223344",
+    "category": "Верхняя одежда",
+    "size_table": [
+      {"intl": "S/M", "ru": 44, "chest_min": 80, "chest_max": 92, "waist_min": 62, "waist_max": 76},
+      {"intl": "L/XL","ru": 48, "chest_min": 92, "chest_max": 104,"waist_min": 76, "waist_max": 88}
+    ]
+  }
+]
