@@ -243,38 +243,66 @@ async def send_catalog(update_or_message, context, is_callback=False):
     await bot.send_message(chat_id=chat_id, text="👇 Выбери товар — нажми *Примерить* под карточкой:", parse_mode="Markdown")
 
     for p in products:
-        article   = p["article"]
-        photo_url = p.get("photo_url", "")
-        wb_url    = f"https://www.wildberries.ru/catalog/{article}/detail.aspx"
-        keyboard  = InlineKeyboardMarkup([
+        article     = p["article"]
+        photo_nums  = p.get("photos", [1])
+        wb_url      = f"https://www.wildberries.ru/catalog/{article}/detail.aspx"
+        keyboard    = InlineKeyboardMarkup([
             [InlineKeyboardButton("👗 Примерить", callback_data=f"product_{p['id']}")],
             [InlineKeyboardButton("🛒 Купить на WB", url=wb_url)],
         ])
-        caption = f"*{p['name']}*"
 
-        sent = False
-        if photo_url:
-            try:
-                img_resp = requests.get(photo_url, headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-                    "Referer": "https://www.wildberries.ru/",
-                }, timeout=10)
-                if img_resp.status_code == 200 and len(img_resp.content) > 1000:
-                    await bot.send_photo(
-                        chat_id=chat_id,
-                        photo=BytesIO(img_resp.content),
-                        caption=caption,
-                        parse_mode="Markdown",
-                        reply_markup=keyboard
+        # Формируем ссылки на фото с GitHub (пробуем jpg и webp)
+        GITHUB_RAW = "https://raw.githubusercontent.com/BMXMAX86/wb-tryon-bot/main/photos"
+
+        # Скачиваем все доступные фото
+        media_items = []
+        for i, n in enumerate(photo_nums):
+            img_data = None
+            for ext in ["jpg", "webp", "jpeg", "png"]:
+                url = f"{GITHUB_RAW}/{article}_{n}.{ext}"
+                try:
+                    r = requests.get(url, timeout=8)
+                    if r.status_code == 200 and len(r.content) > 1000:
+                        img_data = r.content
+                        break  # нашли — дальше не ищем
+                except Exception as e:
+                    logger.error(f"Фото {url}: {e}")
+            if img_data:
+                media_items.append((BytesIO(img_data), i == 0))
+
+        if media_items:
+            if len(media_items) == 1:
+                # Одно фото — с кнопками
+                await bot.send_photo(
+                    chat_id=chat_id,
+                    photo=media_items[0][0],
+                    caption=f"*{p['name']}*",
+                    parse_mode="Markdown",
+                    reply_markup=keyboard
+                )
+            else:
+                # Галерея — несколько фото через media group, кнопки отдельно
+                from telegram import InputMediaPhoto
+                media_group = [
+                    InputMediaPhoto(
+                        media=item[0],
+                        caption=f"*{p['name']}*" if item[1] else None,
+                        parse_mode="Markdown" if item[1] else None
                     )
-                    sent = True
-            except Exception as e:
-                logger.error(f"Ошибка фото {article}: {e}")
-
-        if not sent:
+                    for item in media_items
+                ]
+                await bot.send_media_group(chat_id=chat_id, media=media_group)
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=f"👆 *{p['name']}*",
+                    parse_mode="Markdown",
+                    reply_markup=keyboard
+                )
+        else:
+            # Нет фото — только текст с кнопками
             await bot.send_message(
                 chat_id=chat_id,
-                text=caption,
+                text=f"*{p['name']}*",
                 parse_mode="Markdown",
                 reply_markup=keyboard
             )
