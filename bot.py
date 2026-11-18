@@ -114,8 +114,14 @@ def get_basket_number(vol: int) -> int:
 
 def get_wb_product(article: str) -> dict | None:
     try:
-        url = f"https://card.wb.ru/cards/v2/detail?appType=1&curr=rub&dest=-1257786&nm={article}"
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        url = f"https://card.wb.ru/cards/v2/detail?appType=1&curr=rub&dest=-1257786&spp=30&nm={article}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "*/*",
+            "Accept-Language": "ru-RU,ru;q=0.9",
+            "Origin": "https://www.wildberries.ru",
+            "Referer": "https://www.wildberries.ru/",
+        }
         resp = requests.get(url, headers=headers, timeout=10)
         resp.raise_for_status()
         data = resp.json()
@@ -301,11 +307,16 @@ async def show_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
     wb_data = get_wb_product(cat_item["article"])
 
     if not wb_data:
-        await query.message.reply_text(
-            f"⚠️ Не удалось загрузить данные для артикула {cat_item['article']}.\n"
-            "Проверь артикул в products.json"
-        )
-        return CHOOSING_PRODUCT
+        # Запасной вариант — используем данные из products.json без WB
+        wb_data = {
+            "name": cat_item["name"],
+            "brand": "Easy Style",
+            "price": 0,
+            "image_url": "",
+            "wb_url": f"https://www.wildberries.ru/catalog/{cat_item['article']}/detail.aspx",
+            "article": cat_item["article"],
+            "available_sizes": [],
+        }
 
     # Объединяем данные WB + размерная сетка из products.json
     wb_data["size_table"] = cat_item.get("size_table", [])
