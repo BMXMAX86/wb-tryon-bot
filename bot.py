@@ -407,12 +407,11 @@ async def send_catalog(update_or_message, context, is_callback=False):
     """Отправляет каждый товар как отдельную карточку с фото."""
     products = load_products()
 
+    bot = context.bot
     if is_callback:
         chat_id = update_or_message.message.chat_id
-        bot     = update_or_message.message.bot
     else:
         chat_id = update_or_message.effective_chat.id
-        bot     = context.bot
 
     await bot.send_message(chat_id=chat_id, text="Вот наши топы 💛 Нажми «Примерить» под понравившимся — подберу размер и покажу, как он сядет ✨", parse_mode="Markdown")
 
