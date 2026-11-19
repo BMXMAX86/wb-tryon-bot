@@ -65,6 +65,14 @@ def home_row():
     return [InlineKeyboardButton("🏠 В главное меню", callback_data="menu_main")]
 
 
+def manager_keyboard(client_id):
+    """Кнопки под сообщением клиента в чате менеджера (ID клиента зашит в кнопку)."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("💬 Ответить", callback_data=f"mgr_reply:{client_id}"),
+        InlineKeyboardButton("✅ Закрыть диалог", callback_data=f"mgr_close:{client_id}"),
+    ]])
+
+
 def _download_logo():
     for name in LOGO_FILES:
         try:
@@ -115,6 +123,10 @@ async def _finish_support(context, user, reason):
     """Сообщить менеджеру, что клиент закончил диалог."""
     card_id = context.user_data.get("support_card")
     mgr = manager_id()
+    if mgr:
+        mud = context.application.user_data.get(mgr)
+        if mud and mud.get("reply_to") == user.id:
+            mud.pop("reply_to", None)
     if card_id and mgr:
         try:
             await context.bot.send_message(
@@ -157,7 +169,7 @@ async def client_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mgr = manager_id()
 
     # ответы менеджера в его чате обрабатываются отдельно
-    if mgr and chat_id == mgr and msg.reply_to_message:
+    if mgr and chat_id == mgr and (msg.reply_to_message or context.user_data.get("reply_to")):
         return SUPPORT
 
     if not mgr:
@@ -178,10 +190,10 @@ async def client_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "💬 Вопрос по заказу\n"
                     f"👤 {user.full_name}{uname}\n"
                     f"🆔 {user.id}\n\n"
-                    "Чтобы ответить клиенту — ответь (Reply) на это сообщение "
-                    "или на любое его сообщение ниже.\n"
-                    "Закончить диалог: ответь командой /close"
+                    "Нажми «💬 Ответить» и напиши сообщение — оно уйдёт клиенту.\n"
+                    "Закончить: «✅ Закрыть диалог»."
                 ),
+                reply_markup=manager_keyboard(user.id),
             )
             card_id = card.message_id
             context.user_data["support_card"] = card_id
@@ -190,8 +202,10 @@ async def client_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         copied = await context.bot.copy_message(
             chat_id=mgr, from_chat_id=chat_id, message_id=msg.message_id,
             reply_to_message_id=card_id,
+            reply_markup=manager_keyboard(user.id),
         )
         relay[copied.message_id] = user.id
+        logger.info(f"клиент {user.id} -> менеджеру (карточка {card_id})")
     except Exception as e:
         logger.error(f"Не удалось передать сообщение менеджеру: {e}")
         await msg.reply_text(SUPPORT_OFF, reply_markup=menu_keyboard())
@@ -218,33 +232,93 @@ async def end_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return MAIN_MENU
 
 
-async def manager_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Менеджер отвечает (Reply) на сообщение клиента — ответ уходит клиенту."""
-    msg = update.effective_message
-    client_id = _client_for(context, msg.reply_to_message)
-    if not client_id:
-        await msg.reply_text(
-            "Не поняла, какому клиенту отвечать 🤔 Ответь (Reply) на карточку клиента "
-            "или на одно из его сообщений."
-        )
-        return
+def _is_manager(update):
+    mgr = manager_id()
+    chat = update.effective_chat
+    return bool(mgr) and chat is not None and chat.id == mgr
+
+
+async def _send_to_client(context, client_id, msg):
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Вопрос решён", callback_data="support_done")],
         home_row(),
     ])
+    if msg.text:
+        await context.bot.send_message(
+            chat_id=client_id,
+            text=f"👩‍💼 Менеджер Easy Style:\n{msg.text}",
+            reply_markup=keyboard,
+        )
+    else:
+        await context.bot.send_message(chat_id=client_id, text="👩‍💼 Менеджер Easy Style:")
+        await context.bot.copy_message(
+            chat_id=client_id, from_chat_id=msg.chat_id, message_id=msg.message_id,
+            reply_markup=keyboard,
+        )
+
+
+async def manager_reply_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Менеджер нажал «💬 Ответить»: его следующие сообщения уходят этому клиенту."""
+    query = update.callback_query
+    if not _is_manager(update):
+        await query.answer("Эта кнопка только для менеджера", show_alert=True)
+        return
+    client_id = int(query.data.split(":")[1])
+    context.user_data["reply_to"] = client_id
+    logger.info(f"менеджер включил режим ответа клиенту {client_id}")
+    await query.answer("Пишите ответ — он уйдёт клиенту")
+    await context.bot.send_message(
+        chat_id=query.message.chat_id,
+        text=(
+            "✍️ Пишите ответ — каждое ваше сообщение уйдёт клиенту (можно с фото и файлами).\n"
+            "Когда вопрос решён — нажмите «Закрыть диалог»."
+        ),
+        reply_to_message_id=query.message.message_id,
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Закрыть диалог", callback_data=f"mgr_close:{client_id}"),
+        ]]),
+    )
+
+
+async def manager_close_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Менеджер нажал «✅ Закрыть диалог»."""
+    query = update.callback_query
+    if not _is_manager(update):
+        await query.answer("Эта кнопка только для менеджера", show_alert=True)
+        return
+    client_id = int(query.data.split(":")[1])
+    if context.user_data.get("reply_to") == client_id:
+        context.user_data.pop("reply_to", None)
+    context.application.user_data.get(client_id, {}).pop("support_card", None)
     try:
-        if msg.text:
-            await context.bot.send_message(
-                chat_id=client_id,
-                text=f"👩‍💼 Менеджер Easy Style:\n{msg.text}",
-                reply_markup=keyboard,
+        await context.bot.send_message(chat_id=client_id, text=SUPPORT_CLOSED,
+                                       reply_markup=menu_keyboard())
+        logger.info(f"менеджер закрыл диалог с клиентом {client_id}")
+        await query.answer("Диалог закрыт")
+        await context.bot.send_message(chat_id=query.message.chat_id, text="Диалог закрыт ✅")
+    except Exception as e:
+        logger.error(f"Не удалось закрыть диалог с {client_id}: {e}")
+        await query.answer("Не получилось уведомить клиента", show_alert=True)
+
+
+async def manager_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Сообщение менеджера клиенту: в режиме «Ответить» или через Reply."""
+    msg = update.effective_message
+    target = msg.reply_to_message
+    client_id = _client_for(context, target) if target else None
+    if not client_id:
+        client_id = context.user_data.get("reply_to")
+    logger.info(f"сообщение менеджера: reply={bool(target)} клиент={client_id}")
+    if not client_id:
+        if target:
+            await msg.reply_text(
+                "Не поняла, какому клиенту отвечать 🤔 Нажми «💬 Ответить» под сообщением клиента."
             )
-        else:
-            await context.bot.send_message(chat_id=client_id, text="👩‍💼 Менеджер Easy Style:")
-            await context.bot.copy_message(
-                chat_id=client_id, from_chat_id=msg.chat_id, message_id=msg.message_id,
-                reply_markup=keyboard,
-            )
+        return
+    try:
+        await _send_to_client(context, client_id, msg)
+        logger.info(f"менеджер -> клиенту {client_id}: доставлено")
+        await msg.reply_text("✅ Отправлено клиенту", disable_notification=True)
     except Exception as e:
         logger.error(f"Не удалось отправить ответ клиенту {client_id}: {e}")
         await msg.reply_text(f"Не получилось отправить клиенту: {e}")
@@ -258,6 +332,8 @@ async def manager_close(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("Ответь командой /close на карточку клиента или на его сообщение.")
         return
     context.application.user_data.get(client_id, {}).pop("support_card", None)
+    if context.user_data.get("reply_to") == client_id:
+        context.user_data.pop("reply_to", None)
     try:
         await context.bot.send_message(chat_id=client_id, text=SUPPORT_CLOSED,
                                        reply_markup=menu_keyboard())

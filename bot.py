@@ -19,7 +19,7 @@ from telegram.ext import (
 from support import (
     MAIN_MENU, SUPPORT, manager_id, home_row, send_main_menu,
     go_main_menu, ask_support, end_support, client_message,
-    manager_reply, manager_close, id_command,
+    manager_message, manager_reply_button, manager_close_button, manager_close, id_command,
 )
 
 # ─── Настройки ────────────────────────────────────────────────────────────────
@@ -45,6 +45,7 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)  # без токена в логах
 
 # ─── Размерная сетка ─────────────────────────────────────────────────────────
 
@@ -772,7 +773,9 @@ def main():
 
     mgr = manager_id()
     if mgr:
-        app.add_handler(MessageHandler(filters.Chat(chat_id=mgr) & filters.REPLY & ~filters.COMMAND, manager_reply), group=-1)
+        app.add_handler(CallbackQueryHandler(manager_reply_button, pattern=r"^mgr_reply:\d+$"), group=-1)
+        app.add_handler(CallbackQueryHandler(manager_close_button, pattern=r"^mgr_close:\d+$"), group=-1)
+        app.add_handler(MessageHandler(filters.Chat(chat_id=mgr) & ~filters.COMMAND, manager_message), group=-1)
         app.add_handler(CommandHandler("close", manager_close, filters=filters.Chat(chat_id=mgr) & filters.REPLY), group=-1)
     else:
         logger.warning("MANAGER_CHAT_ID не задан — связь с менеджером отключена")
