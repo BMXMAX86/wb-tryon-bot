@@ -24,6 +24,10 @@ from support import (
     go_main_menu, ask_support, end_support, client_message,
     manager_message, manager_reply_button, manager_close_button, manager_close, id_command,
 )
+from consent import (
+    ask_consent, has_consent, grant_consent, consent_doc, privacy_menu, privacy_cmd,
+    privacy_revoke, privacy_delete, init_db, legal_missing, DB_PATH, PERSISTENT,
+)
 
 # ─── Настройки ────────────────────────────────────────────────────────────────
 
@@ -31,6 +35,7 @@ BOT_TOKEN         = os.environ.get("BOT_TOKEN", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 FASHN_API_KEY     = os.environ.get("FASHN_API_KEY", "")      # виртуальная примерка (FASHN)
 TRYON_DAILY_LIMIT = int(os.environ.get("TRYON_DAILY_LIMIT", "5"))  # примерок на человека в день
+STYLIST_ADVICE    = os.environ.get("STYLIST_ADVICE", "") == "1"    # совет стилиста от Claude (передаёт фото в Anthropic)
 PRODUCTS_FILE     = "products.json"
 
 # Фото бренда для приветствия (ссылка на фото с WB или прямая ссылка)
@@ -502,7 +507,7 @@ async def _run_tryon(bot, chat_id, user_id, photo_bytes, product, size_info, mea
                 return None
 
         async def run_claude():
-            if not (ANTHROPIC_API_KEY and garment):
+            if not (ANTHROPIC_API_KEY and STYLIST_ADVICE and garment):
                 return None
             return await asyncio.to_thread(
                 virtual_tryon, photo_bytes, garment, product["name"], size_info, measurements)
@@ -619,12 +624,39 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return MAIN_MENU
 
 
+async def consent_yes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Пользователь согласился на обработку фото — сохраняем и продолжаем примерку."""
+    query = update.callback_query
+    if not grant_consent(update.effective_user.id):
+        await query.answer("Не удалось сохранить согласие. Попробуй чуть позже.", show_alert=True)
+        return None
+    await query.answer("Спасибо! Согласие сохранено ✅")
+    product_id = int(query.data.split(":")[1])
+    if product_id > 0:
+        return await _begin_product(query, context, product_id)
+    await context.bot.send_message(chat_id=query.message.chat_id, text="Спасибо! Теперь отправь своё фото 📸")
+    return WAITING_FOR_PHOTO
+
+
+async def consent_no(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """«Продолжить без примерки» — возвращаем в каталог без ограничений."""
+    return await back_to_catalog(update, context)
+
+
 async def show_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Начинает сбор параметров после нажатия «Примерить»."""
+    """Вход в примерку: сначала согласие на обработку фото (один раз), затем сбор параметров."""
     query = update.callback_query
     await query.answer()
 
     product_id = int(query.data.replace("product_", ""))
+    if not has_consent(update.effective_user.id):
+        await ask_consent(context.bot, query.message.chat_id, product_id)
+        return BROWSING_CATALOG
+    return await _begin_product(query, context, product_id)
+
+
+async def _begin_product(query, context, product_id):
+    """Начинает сбор параметров после нажатия «Примерить»."""
     catalog    = load_products()
     cat_item   = next((p for p in catalog if p["id"] == product_id), None)
     if not cat_item:
@@ -831,6 +863,11 @@ async def handle_user_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Сначала выбери товар. Нажми /start")
         return BROWSING_CATALOG
 
+    # без действующего согласия фото не принимаем и никуда не передаём
+    if not has_consent(update.effective_user.id):
+        await ask_consent(context.bot, update.effective_chat.id, 0)
+        return BROWSING_CATALOG
+
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
 
@@ -908,11 +945,17 @@ def main():
         CallbackQueryHandler(back_to_catalog, pattern="^menu_catalog$"),
         CallbackQueryHandler(ask_support, pattern="^menu_support$"),
         CallbackQueryHandler(end_support, pattern="^support_done$"),
+        CallbackQueryHandler(consent_yes, pattern=r"^consent_yes:\d+$"),
+        CallbackQueryHandler(consent_no, pattern="^consent_no$"),
+        CallbackQueryHandler(consent_doc, pattern=r"^consent_doc:\d+$"),
+        CallbackQueryHandler(privacy_menu, pattern="^menu_privacy$"),
+        CallbackQueryHandler(privacy_revoke, pattern="^privacy_revoke$"),
+        CallbackQueryHandler(privacy_delete, pattern="^privacy_delete$"),
     ]
     back = CallbackQueryHandler(back_to_catalog, pattern="^back_to_catalog$")
 
     conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start)] + common + [back],
+        entry_points=[CommandHandler("start", start), CommandHandler("privacy", privacy_cmd)] + common + [back],
         states={
             MAIN_MENU: common,
             BROWSING_CATALOG: [CallbackQueryHandler(show_product, pattern=r"^product_\d+$"), back] + common,
@@ -927,7 +970,7 @@ def main():
             ] + common,
             SUPPORT: [MessageHandler(~filters.COMMAND & filters.ChatType.PRIVATE, client_message)] + common,
         },
-        fallbacks=[CommandHandler("start", start), CommandHandler("cancel", cancel)],
+        fallbacks=[CommandHandler("start", start), CommandHandler("privacy", privacy_cmd), CommandHandler("cancel", cancel)],
     )
     app.add_handler(conv)
 
@@ -941,6 +984,14 @@ def main():
         logger.warning("MANAGER_CHAT_ID не задан — связь с менеджером отключена")
     app.add_handler(CommandHandler("id", id_command))
 
+    try:
+        init_db()
+        logger.info(f"Хранилище согласий: {DB_PATH} ({'постоянное' if PERSISTENT else 'НЕ постоянное: подключите том Railway'})")
+    except Exception as e:
+        logger.error(f"Хранилище согласий недоступно: {e}")
+    missing = legal_missing()
+    if missing:
+        logger.warning("legal.json не заполнен: " + ", ".join(missing))
     if FASHN_API_KEY:
         try:
             logger.info(f"FASHN: ключ принят, баланс: {fashn_credits()}")

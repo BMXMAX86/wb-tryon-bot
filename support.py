@@ -58,6 +58,7 @@ def menu_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🛍 Выбрать новый топ", callback_data="menu_catalog")],
         [InlineKeyboardButton("💬 Вопрос по заказу", callback_data="menu_support")],
+        [InlineKeyboardButton("🛡 Мои данные", callback_data="menu_privacy")],
     ])
 
 
