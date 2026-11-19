@@ -129,54 +129,96 @@ def load_size_ids() -> dict:
 
 # ─── WB API ───────────────────────────────────────────────────────────────────
 
-_stock_cache = {}
-_stock_last_fetch = {}
+STOCK_CSV_URL = "https://raw.githubusercontent.com/BMXMAX86/wb-tryon-bot/main/stock.csv"
+WB_API_TOKEN  = os.environ.get("WB_API_TOKEN", "")
 
-def get_stock_by_article(article: str) -> dict:
+_manual_stock_cache = {}
+_manual_stock_fetch = 0
+_seller_stock_cache = {}
+_seller_stock_fetch = 0
+
+
+def load_manual_stock() -> dict:
     """
-    Возвращает словарь { option_id: in_stock (bool) } для всех размеров товара.
-    Кэшируется на 10 минут.
+    stock.csv на GitHub: article,name,S,M,L,XL,XXL — 1 есть, 0 нет, пусто = неизвестно.
+    Возвращает { "артикул": {"S": True, "M": False, ...} }. Кэш 2 минуты.
     """
     import time
+    global _manual_stock_cache, _manual_stock_fetch
     now = time.time()
-
-    if article in _stock_cache and (now - _stock_last_fetch.get(article, 0)) < 600:
-        return _stock_cache[article]
-
+    if _manual_stock_cache and (now - _manual_stock_fetch) < 120:
+        return _manual_stock_cache
     try:
-        url = (
-            f"https://card.wb.ru/cards/v2/detail"
-            f"?appType=1&curr=rub&dest=-1257786&spp=30&nm={article}"
-        )
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "*/*",
-            "Accept-Language": "ru-RU,ru;q=0.9",
-            "Origin": "https://www.wildberries.ru",
-            "Referer": "https://www.wildberries.ru/",
-        }
-        resp = requests.get(url, headers=headers, timeout=10)
+        resp = requests.get(STOCK_CSV_URL, timeout=8)
         resp.raise_for_status()
-        products = resp.json().get("data", {}).get("products", [])
-        if not products:
-            return {}
-
+        lines = resp.text.strip().splitlines()
+        headers = [h.strip() for h in lines[0].split(",")]
+        sizes = headers[2:]
         result = {}
-        for s in products[0].get("sizes", []):
-            option_id = s.get("optionId")
-            stocks    = s.get("stocks", [])
-            in_stock  = any(st.get("qty", 0) > 0 for st in stocks)
-            if option_id:
-                result[option_id] = in_stock
-
-        _stock_cache[article]      = result
-        _stock_last_fetch[article] = now
-        logger.info(f"Остатки {article}: {result}")
+        for line in lines[1:]:
+            parts = [x.strip() for x in line.split(",")]
+            if not parts or not parts[0]:
+                continue
+            row = {}
+            for i, size in enumerate(sizes):
+                val = parts[2 + i] if (2 + i) < len(parts) else ""
+                if val in ("0", "1"):
+                    row[size] = (val == "1")
+            result[parts[0]] = row
+        _manual_stock_cache = result
+        _manual_stock_fetch = now
         return result
-
     except Exception as e:
-        logger.error(f"Ошибка проверки остатков {article}: {e}")
-        return _stock_cache.get(article, {})
+        logger.error(f"Ошибка загрузки stock.csv: {e}")
+        return _manual_stock_cache
+
+
+def load_seller_stock() -> dict:
+    """
+    Остатки из официального API продавца WB (нужна переменная WB_API_TOKEN).
+    Возвращает { "nmId": {"S": количество, ...} }. Кэш 10 минут (лимит API — 1 запрос в минуту).
+    """
+    import time
+    global _seller_stock_cache, _seller_stock_fetch
+    if not WB_API_TOKEN:
+        return {}
+    now = time.time()
+    if _seller_stock_fetch and (now - _seller_stock_fetch) < 600:
+        return _seller_stock_cache
+    try:
+        resp = requests.get(
+            "https://statistics-api.wildberries.ru/api/v1/supplier/stocks",
+            params={"dateFrom": "2019-06-20"},
+            headers={"Authorization": WB_API_TOKEN},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        result = {}
+        for item in resp.json():
+            nm   = str(item.get("nmId", ""))
+            size = str(item.get("techSize", "")).strip().upper()
+            qty  = int(item.get("quantity", 0) or 0)
+            result.setdefault(nm, {})
+            result[nm][size] = result[nm].get(size, 0) + qty
+        _seller_stock_cache = result
+        _seller_stock_fetch = now
+        logger.info(f"Остатки из API продавца: {len(result)} артикулов")
+        return result
+    except Exception as e:
+        logger.error(f"Ошибка API продавца WB: {e}")
+        _seller_stock_fetch = now - 480  # повторить через 2 минуты
+        return _seller_stock_cache
+
+
+def get_size_availability(article: str, size: str):
+    """True — есть, False — нет, None — неизвестно. Сначала API продавца, потом stock.csv."""
+    seller = load_seller_stock()
+    if article in seller:
+        return seller[article].get(size.strip().upper(), 0) > 0
+    manual = load_manual_stock().get(article, {})
+    if size in manual:
+        return manual[size]
+    return None
 
 def get_basket_number(vol: int) -> int:
     if vol <= 143:    return 1
@@ -569,71 +611,69 @@ async def ask_waist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     matched = find_size_in_wb(product.get("available_sizes", []), size_info["ru"], size_info["intl"])
     context.user_data["matched_size"] = matched
 
-    # Читаем size_ids из CSV на GitHub
+    # Ссылка на размер + проверка наличия (API продавца / stock.csv)
     all_size_ids = load_size_ids()
-    size_ids     = all_size_ids.get(product["article"], {})
-    option_id    = size_ids.get(size_info["intl"]) or size_ids.get(str(size_info["ru"]))
+    article      = product["article"]
+    base_url     = f"https://www.wildberries.ru/catalog/{article}/detail.aspx"
+    sizes_order  = [row["intl"] for row in size_table]
+    wanted       = size_info["intl"]
 
-    if not option_id and matched:
-        option_id = matched.get("option_id")
+    def size_url(art, size_name):
+        sid  = all_size_ids.get(art, {}).get(size_name)
+        page = f"https://www.wildberries.ru/catalog/{art}/detail.aspx"
+        return f"{page}?size={sid}" if sid else page
 
-    # Проверяем остатки на WB
-    stock        = get_stock_by_article(product["article"])
-    in_stock     = stock.get(option_id, None)  # None = не удалось проверить
+    avail      = {s: get_size_availability(article, s) for s in sizes_order}
+    state      = avail.get(wanted)
+    buy_url    = size_url(article, wanted)
+    buy_label  = f"🛒 Купить {wanted} на WB"
+    extra_rows = []
 
-    base_url = f"https://www.wildberries.ru/catalog/{product['article']}/detail.aspx"
+    if state is True:
+        size_status = f"✅ Размер *{wanted} ({size_info['ru']})* есть в наличии!"
 
-    if option_id and in_stock is True:
-        buy_url     = f"{base_url}?size={option_id}"
-        size_status = f"✅ Размер *{size_info['intl']} ({size_info['ru']})* — есть в наличии!"
+    elif state is False:
+        idx      = sizes_order.index(wanted) if wanted in sizes_order else 0
+        in_stock = [s for s in sizes_order if avail.get(s) is True]
+        # ближайший размер в наличии; при равном расстоянии — больший
+        in_stock.sort(key=lambda s: (abs(sizes_order.index(s) - idx), 0 if sizes_order.index(s) > idx else 1))
 
-    elif option_id and in_stock is False:
-        # Нужного размера нет — ищем ближайший доступный
-        size_table  = product.get("size_table", [])
-        sizes_order = [row["intl"] for row in size_table]
-        cur_idx     = sizes_order.index(size_info["intl"]) if size_info["intl"] in sizes_order else -1
-
-        fallback_id   = None
-        fallback_name = None
-
-        # Ищем сначала больший размер, потом меньший
-        for delta in [1, -1, 2, -2]:
-            idx = cur_idx + delta
-            if 0 <= idx < len(sizes_order):
-                candidate_intl = sizes_order[idx]
-                candidate_id   = size_ids.get(candidate_intl)
-                if candidate_id and stock.get(candidate_id):
-                    fallback_id   = candidate_id
-                    fallback_name = candidate_intl
-                    break
-
-        if fallback_id:
-            buy_url     = f"{base_url}?size={fallback_id}"
+        if in_stock:
+            alt       = in_stock[0]
+            buy_url   = size_url(article, alt)
+            buy_label = f"🛒 Купить {alt} на WB"
+            have      = ", ".join(s for s in sizes_order if avail.get(s) is True)
             size_status = (
-                f"⚠️ Размер *{size_info['intl']}* закончился.\n"
-                f"Ближайший доступный: *{fallback_name}* — открываем его."
+                f"⚠️ Размер *{wanted}* на этой модели закончился.\n"
+                f"Есть: *{have}*. Ближайший к твоим меркам — *{alt}*."
             )
         else:
-            buy_url     = base_url
-            # Собираем список всех доступных размеров
-            avail_names = [
-                name for name, sid in size_ids.items()
-                if sid and stock.get(sid)
-            ]
-            size_status = (
-                f"❌ Размер *{size_info['intl']}* и соседние размеры закончились.\n"
-                + (f"Сейчас есть: *{', '.join(avail_names)}*" if avail_names else "Все размеры закончились — проверь позже.")
-            )
+            buy_url   = base_url
+            buy_label = "🛒 Открыть товар на WB"
+            size_status = f"❌ На этой модели размер *{wanted}* и остальные размеры сейчас закончились."
 
-    elif option_id and in_stock is None:
-        # Не удалось проверить остатки (WB недоступен с EU сервера)
-        buy_url     = f"{base_url}?size={option_id}"
-        size_status = f"🔗 Размер *{size_info['intl']} ({size_info['ru']})* — прямая ссылка готова."
+        # другие модели, где нужный размер есть в наличии
+        for p2 in load_products():
+            if p2["article"] == article:
+                continue
+            if get_size_availability(p2["article"], wanted) is True:
+                extra_rows.append([InlineKeyboardButton(
+                    f"🔁 {p2['name'][:40]} — {wanted}",
+                    url=size_url(p2["article"], wanted)
+                )])
+            if len(extra_rows) >= 3:
+                break
+        if extra_rows:
+            size_status += f"\n\nМожно выбрать другую модель в размере *{wanted}* 👇"
 
     else:
-        buy_url     = base_url
-        size_status = f"⚠️ Размер *{size_info['intl']}* — уточни наличие на сайте."
+        size_status = (
+            f"🔗 Размер *{wanted} ({size_info['ru']})* — наличие проверить не удалось, "
+            f"на странице WB выбери доступный размер."
+        )
 
+    context.user_data["buy_label"]  = buy_label
+    context.user_data["extra_rows"] = extra_rows
     context.user_data["buy_url"] = buy_url
     note_text = f"\n\n💡 _{size_info['note']}_" if size_info.get("note") else ""
 
@@ -644,7 +684,8 @@ async def ask_waist(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"_Лучше всего — фото в полный рост на светлом фоне._",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🛒 Купить без примерки", url=buy_url)],
+            [InlineKeyboardButton(buy_label, url=buy_url)],
+            *extra_rows,
             [InlineKeyboardButton("◀️ Назад к каталогу", callback_data="back_to_catalog")],
         ])
     )
@@ -681,9 +722,10 @@ async def handle_user_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(
-                f"🛒 Купить размер {size_info['intl']} на WB",
+                context.user_data.get("buy_label", f"🛒 Купить размер {size_info['intl']} на WB"),
                 url=buy_url
             )],
+            *context.user_data.get("extra_rows", []),
             [InlineKeyboardButton("👗 Выбрать другой товар", callback_data="back_to_catalog")],
         ])
     )
