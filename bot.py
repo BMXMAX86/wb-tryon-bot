@@ -79,7 +79,11 @@ def calculate_size(chest: int, waist: int, size_table: list) -> dict:
 
 def load_products():
     with open(PRODUCTS_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+        products = json.load(f)
+    # title = название как на Wildberries + цвет (чтобы отличать модели с одинаковым названием)
+    for p in products:
+        p["title"] = f"{p['name']} ({p['color']})" if p.get("color") else p["name"]
+    return products
 
 
 # ─── Загрузка size_ids из CSV на GitHub ──────────────────────────────────────
@@ -437,7 +441,7 @@ async def send_catalog(update_or_message, context, is_callback=False):
                 await bot.send_photo(
                     chat_id=chat_id,
                     photo=media_items[0][0],
-                    caption=f"*{p['name']}*",
+                    caption=f"*{p['title']}*",
                     parse_mode="Markdown",
                     reply_markup=keyboard
                 )
@@ -447,7 +451,7 @@ async def send_catalog(update_or_message, context, is_callback=False):
                 media_group = [
                     InputMediaPhoto(
                         media=item[0],
-                        caption=f"*{p['name']}*" if item[1] else None,
+                        caption=f"*{p['title']}*" if item[1] else None,
                         parse_mode="Markdown" if item[1] else None
                     )
                     for item in media_items
@@ -455,7 +459,7 @@ async def send_catalog(update_or_message, context, is_callback=False):
                 await bot.send_media_group(chat_id=chat_id, media=media_group)
                 await bot.send_message(
                     chat_id=chat_id,
-                    text=f"👆 *{p['name']}*",
+                    text=f"👆 *{p['title']}*",
                     parse_mode="Markdown",
                     reply_markup=keyboard
                 )
@@ -463,7 +467,7 @@ async def send_catalog(update_or_message, context, is_callback=False):
             # Нет фото — только текст с кнопками
             await bot.send_message(
                 chat_id=chat_id,
-                text=f"*{p['name']}*",
+                text=f"*{p['title']}*",
                 parse_mode="Markdown",
                 reply_markup=keyboard
             )
@@ -500,7 +504,7 @@ async def show_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
     wb_data = get_wb_product(cat_item["article"])
     if not wb_data:
         wb_data = {
-            "name": cat_item["name"], "brand": "Easy Style", "price": 0,
+            "name": cat_item["title"], "brand": "Easy Style", "price": 0,
             "image_url": get_wb_image_url(cat_item["article"]),
             "wb_url": f"https://www.wildberries.ru/catalog/{cat_item['article']}/detail.aspx",
             "article": cat_item["article"], "available_sizes": [],
@@ -647,7 +651,7 @@ async def ask_waist(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 continue
             if get_size_availability(p2["article"], wanted) is True:
                 extra_rows.append([InlineKeyboardButton(
-                    f"🔁 {p2['name'][:40]} — {wanted}",
+                    f"🔁 {p2['title'][:45]} — {wanted}",
                     url=size_url(p2["article"], wanted)
                 )])
             if len(extra_rows) >= 3:
