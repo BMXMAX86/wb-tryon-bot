@@ -1,3 +1,4 @@
+import os
 import json
 import logging
 import requests
@@ -17,8 +18,8 @@ from telegram.ext import (
 
 # ─── Настройки ────────────────────────────────────────────────────────────────
 
-BOT_TOKEN         = "8662684328:AAGNUtRqxmHOlKPvBGnUtSHXYFpzmHTAMyw"
-ANTHROPIC_API_KEY = "ВСТАВЬ_СВОЙ_ANTHROPIC_API_KEY_СЮДА"
+BOT_TOKEN         = os.environ.get("BOT_TOKEN", "")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 PRODUCTS_FILE     = "products.json"
 
 # Фото бренда для приветствия (ссылка на фото с WB или прямая ссылка)
@@ -73,7 +74,109 @@ def load_products():
     with open(PRODUCTS_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
+
+# ─── Загрузка size_ids из CSV на GitHub ──────────────────────────────────────
+
+GITHUB_CSV_URL = "https://raw.githubusercontent.com/BMXMAX86/wb-tryon-bot/main/size_ids.csv"
+
+_size_ids_cache = {}
+_size_ids_last_fetch = 0
+
+def load_size_ids() -> dict:
+    """
+    Читает size_ids.csv с GitHub и возвращает словарь:
+    { "982153895": {"S": 123, "M": 456, ...}, ... }
+    Кэшируется на 5 минут чтобы не грузить GitHub при каждом сообщении.
+    """
+    import time
+    global _size_ids_cache, _size_ids_last_fetch
+
+    now = time.time()
+    if _size_ids_cache and (now - _size_ids_last_fetch) < 300:
+        return _size_ids_cache
+
+    try:
+        resp = requests.get(GITHUB_CSV_URL, timeout=8)
+        resp.raise_for_status()
+        lines = resp.text.strip().splitlines()
+        if not lines:
+            return _size_ids_cache
+
+        headers = [h.strip() for h in lines[0].split(",")]
+        sizes   = headers[2:]  # S, M, L, XL, XXL и любые новые
+
+        result = {}
+        for line in lines[1:]:
+            parts = line.split(",")
+            if len(parts) < 2:
+                continue
+            article = parts[0].strip()
+            ids = {}
+            for i, size in enumerate(sizes):
+                val = parts[2 + i].strip() if (2 + i) < len(parts) else ""
+                if val and val.isdigit():
+                    ids[size] = int(val)
+            result[article] = ids
+
+        _size_ids_cache     = result
+        _size_ids_last_fetch = now
+        logger.info(f"size_ids загружены: {len(result)} артикулов")
+        return result
+
+    except Exception as e:
+        logger.error(f"Ошибка загрузки size_ids.csv: {e}")
+        return _size_ids_cache  # возвращаем старый кэш если есть
+
 # ─── WB API ───────────────────────────────────────────────────────────────────
+
+_stock_cache = {}
+_stock_last_fetch = {}
+
+def get_stock_by_article(article: str) -> dict:
+    """
+    Возвращает словарь { option_id: in_stock (bool) } для всех размеров товара.
+    Кэшируется на 10 минут.
+    """
+    import time
+    now = time.time()
+
+    if article in _stock_cache and (now - _stock_last_fetch.get(article, 0)) < 600:
+        return _stock_cache[article]
+
+    try:
+        url = (
+            f"https://card.wb.ru/cards/v2/detail"
+            f"?appType=1&curr=rub&dest=-1257786&spp=30&nm={article}"
+        )
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "*/*",
+            "Accept-Language": "ru-RU,ru;q=0.9",
+            "Origin": "https://www.wildberries.ru",
+            "Referer": "https://www.wildberries.ru/",
+        }
+        resp = requests.get(url, headers=headers, timeout=10)
+        resp.raise_for_status()
+        products = resp.json().get("data", {}).get("products", [])
+        if not products:
+            return {}
+
+        result = {}
+        for s in products[0].get("sizes", []):
+            option_id = s.get("optionId")
+            stocks    = s.get("stocks", [])
+            in_stock  = any(st.get("qty", 0) > 0 for st in stocks)
+            if option_id:
+                result[option_id] = in_stock
+
+        _stock_cache[article]      = result
+        _stock_last_fetch[article] = now
+        logger.info(f"Остатки {article}: {result}")
+        return result
+
+    except Exception as e:
+        logger.error(f"Ошибка проверки остатков {article}: {e}")
+        return _stock_cache.get(article, {})
 
 def get_basket_number(vol: int) -> int:
     if vol <= 143:    return 1
@@ -182,6 +285,28 @@ def download_image(url: str) -> bytes | None:
         logger.error(f"Ошибка скачивания: {e}")
         return None
 
+
+GITHUB_PHOTOS_URL = "https://raw.githubusercontent.com/BMXMAX86/wb-tryon-bot/main/photos"
+
+def get_github_photo(article, n=1):
+    """Фото товара из папки photos на GitHub: артикул_номер.webp/jpg/png"""
+    for ext in ["webp", "jpg", "jpeg", "png"]:
+        try:
+            r = requests.get(f"{GITHUB_PHOTOS_URL}/{article}_{n}.{ext}", timeout=8)
+            if r.status_code == 200 and len(r.content) > 1000:
+                return r.content
+        except Exception as e:
+            logger.error(f"Фото {article}_{n}.{ext}: {e}")
+    return None
+
+
+def image_media_type(data):
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    return "image/jpeg"
+
 # ─── Виртуальная примерка ─────────────────────────────────────────────────────
 
 def virtual_tryon(user_photo_bytes, product_image_bytes, product_name, size_info, measurements):
@@ -204,9 +329,9 @@ def virtual_tryon(user_photo_bytes, product_image_bytes, product_name, size_info
                             f"дай 1-2 совета по сочетанию. По-русски, как стилист. Не более 5 предложений."
                         )
                     },
-                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                    {"type": "image", "source": {"type": "base64", "media_type": image_media_type(user_photo_bytes),
                                                   "data": base64.b64encode(user_photo_bytes).decode()}},
-                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                    {"type": "image", "source": {"type": "base64", "media_type": image_media_type(product_image_bytes),
                                                   "data": base64.b64encode(product_image_bytes).decode()}},
                 ]
             }]
@@ -251,22 +376,10 @@ async def send_catalog(update_or_message, context, is_callback=False):
             [InlineKeyboardButton("🛒 Купить на WB", url=wb_url)],
         ])
 
-        # Формируем ссылки на фото с GitHub (пробуем jpg и webp)
-        GITHUB_RAW = "https://raw.githubusercontent.com/BMXMAX86/wb-tryon-bot/main/photos"
-
-        # Скачиваем все доступные фото
+        # Скачиваем все доступные фото из папки photos на GitHub
         media_items = []
         for i, n in enumerate(photo_nums):
-            img_data = None
-            for ext in ["jpg", "webp", "jpeg", "png"]:
-                url = f"{GITHUB_RAW}/{article}_{n}.{ext}"
-                try:
-                    r = requests.get(url, timeout=8)
-                    if r.status_code == 200 and len(r.content) > 1000:
-                        img_data = r.content
-                        break  # нашли — дальше не ищем
-                except Exception as e:
-                    logger.error(f"Фото {url}: {e}")
+            img_data = get_github_photo(article, n)
             if img_data:
                 media_items.append((BytesIO(img_data), i == 0))
 
@@ -315,15 +428,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Приветственное фото — берём из первого товара в products.json
     cover_img = None
     try:
-        first_product = load_products()[0]
-        cover_url = first_product.get("photo_url", "")
-        if cover_url:
-            r = requests.get(cover_url, headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-                "Referer": "https://www.wildberries.ru/",
-            }, timeout=10)
-            if r.status_code == 200 and len(r.content) > 1000:
-                cover_img = r.content
+        cover_img = get_github_photo(load_products()[0]["article"], 1)
     except Exception:
         pass
 
@@ -464,16 +569,70 @@ async def ask_waist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     matched = find_size_in_wb(product.get("available_sizes", []), size_info["ru"], size_info["intl"])
     context.user_data["matched_size"] = matched
 
-    if matched:
-        buy_url     = build_wb_size_url(product["article"], matched.get("option_id"))
-        size_status = f"✅ Размер *{matched['name']}* есть в наличии!"
+    # Читаем size_ids из CSV на GitHub
+    all_size_ids = load_size_ids()
+    size_ids     = all_size_ids.get(product["article"], {})
+    option_id    = size_ids.get(size_info["intl"]) or size_ids.get(str(size_info["ru"]))
+
+    if not option_id and matched:
+        option_id = matched.get("option_id")
+
+    # Проверяем остатки на WB
+    stock        = get_stock_by_article(product["article"])
+    in_stock     = stock.get(option_id, None)  # None = не удалось проверить
+
+    base_url = f"https://www.wildberries.ru/catalog/{product['article']}/detail.aspx"
+
+    if option_id and in_stock is True:
+        buy_url     = f"{base_url}?size={option_id}"
+        size_status = f"✅ Размер *{size_info['intl']} ({size_info['ru']})* — есть в наличии!"
+
+    elif option_id and in_stock is False:
+        # Нужного размера нет — ищем ближайший доступный
+        size_table  = product.get("size_table", [])
+        sizes_order = [row["intl"] for row in size_table]
+        cur_idx     = sizes_order.index(size_info["intl"]) if size_info["intl"] in sizes_order else -1
+
+        fallback_id   = None
+        fallback_name = None
+
+        # Ищем сначала больший размер, потом меньший
+        for delta in [1, -1, 2, -2]:
+            idx = cur_idx + delta
+            if 0 <= idx < len(sizes_order):
+                candidate_intl = sizes_order[idx]
+                candidate_id   = size_ids.get(candidate_intl)
+                if candidate_id and stock.get(candidate_id):
+                    fallback_id   = candidate_id
+                    fallback_name = candidate_intl
+                    break
+
+        if fallback_id:
+            buy_url     = f"{base_url}?size={fallback_id}"
+            size_status = (
+                f"⚠️ Размер *{size_info['intl']}* закончился.\n"
+                f"Ближайший доступный: *{fallback_name}* — открываем его."
+            )
+        else:
+            buy_url     = base_url
+            # Собираем список всех доступных размеров
+            avail_names = [
+                name for name, sid in size_ids.items()
+                if sid and stock.get(sid)
+            ]
+            size_status = (
+                f"❌ Размер *{size_info['intl']}* и соседние размеры закончились.\n"
+                + (f"Сейчас есть: *{', '.join(avail_names)}*" if avail_names else "Все размеры закончились — проверь позже.")
+            )
+
+    elif option_id and in_stock is None:
+        # Не удалось проверить остатки (WB недоступен с EU сервера)
+        buy_url     = f"{base_url}?size={option_id}"
+        size_status = f"🔗 Размер *{size_info['intl']} ({size_info['ru']})* — прямая ссылка готова."
+
     else:
-        buy_url   = product.get("wb_url", "")
-        avail     = ", ".join(s["name"] for s in product.get("available_sizes", []))
-        size_status = (
-            f"⚠️ Размера *{size_info['ru']} ({size_info['intl']})* сейчас нет.\n"
-            f"Доступны: {avail or 'уточни на сайте'}"
-        )
+        buy_url     = base_url
+        size_status = f"⚠️ Размер *{size_info['intl']}* — уточни наличие на сайте."
 
     context.user_data["buy_url"] = buy_url
     note_text = f"\n\n💡 _{size_info['note']}_" if size_info.get("note") else ""
@@ -506,7 +665,7 @@ async def handle_user_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✨ Анализирую образ, подожди несколько секунд...")
 
     photo_bytes       = await (await update.message.photo[-1].get_file()).download_as_bytearray()
-    product_img_bytes = download_image(product["image_url"])
+    product_img_bytes = get_github_photo(product["article"], 1) or download_image(product["image_url"])
 
     if not product_img_bytes:
         await update.message.reply_text("❌ Не удалось загрузить фото товара.")
@@ -514,10 +673,7 @@ async def handle_user_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     analysis = virtual_tryon(bytes(photo_bytes), product_img_bytes, product["name"], size_info, measurements)
 
-    size_line = (
-        f"📐 Твой размер: *{size_info['intl']} ({size_info['ru']})*"
-        + (" — в наличии ✅" if matched else " — нет в наличии ⚠️")
-    )
+    size_line = f"📐 Твой размер: *{size_info['intl']} ({size_info['ru']})*"
 
     await update.message.reply_text(
         f"👗 *{product['name']}*\n{size_line}\n\n"
@@ -525,7 +681,7 @@ async def handle_user_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(
-                f"🛒 Купить размер {matched['name'] if matched else size_info['intl']} на WB",
+                f"🛒 Купить размер {size_info['intl']} на WB",
                 url=buy_url
             )],
             [InlineKeyboardButton("👗 Выбрать другой товар", callback_data="back_to_catalog")],
@@ -549,6 +705,8 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─── Запуск ───────────────────────────────────────────────────────────────────
 
 def main():
+    if not BOT_TOKEN:
+        raise SystemExit("BOT_TOKEN не задан: добавь переменную BOT_TOKEN в Variables на Railway")
     app = Application.builder().token(BOT_TOKEN).build()
 
     conv = ConversationHandler(
