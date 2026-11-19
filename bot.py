@@ -446,17 +446,21 @@ async def send_catalog(update_or_message, context, is_callback=False):
                     reply_markup=keyboard
                 )
             else:
-                # Галерея — несколько фото через media group, кнопки отдельно
-                from telegram import InputMediaPhoto
-                media_group = [
-                    InputMediaPhoto(
-                        media=item[0],
-                        caption=f"*{p['title']}*" if item[1] else None,
-                        parse_mode="Markdown" if item[1] else None
+                # Первое фото — крупно, остальные альбомом под ним (мельче), кнопки в конце
+                await bot.send_photo(
+                    chat_id=chat_id,
+                    photo=media_items[0][0],
+                    caption=f"*{p['title']}*",
+                    parse_mode="Markdown"
+                )
+                rest = [item[0] for item in media_items[1:]]
+                if len(rest) >= 2:
+                    await bot.send_media_group(
+                        chat_id=chat_id,
+                        media=[InputMediaPhoto(media=photo) for photo in rest]
                     )
-                    for item in media_items
-                ]
-                await bot.send_media_group(chat_id=chat_id, media=media_group)
+                else:
+                    await bot.send_photo(chat_id=chat_id, photo=rest[0])
                 await bot.send_message(
                     chat_id=chat_id,
                     text=f"👆 *{p['title']}*",
