@@ -454,6 +454,7 @@ def fashn_tryon(person_bytes, garment_bytes):
             "model_image": to_data_uri(person_bytes),
             "garment_image": to_data_uri(to_jpeg(garment_bytes)),
             "category": "tops",
+            "mode": "quality",
         },
     }
     job = _fashn_json(requests.post(f"{FASHN_URL}/run", json=payload, headers=_fashn_headers(), timeout=60))
@@ -486,7 +487,7 @@ async def _run_tryon(bot, chat_id, user_id, photo_bytes, product, size_info, mea
     """Фоновая примерка: картинка от FASHN + короткий совет стилиста от Claude."""
     try:
         article = product["article"]
-        n = product.get("tryon_photo", 3)
+        n = product.get("tryon_photo", "tryon")
         garment = (await asyncio.to_thread(get_github_photo, article, n)
                    or await asyncio.to_thread(get_github_photo, article, 1)
                    or await asyncio.to_thread(download_image, product["image_url"]))
@@ -641,7 +642,7 @@ async def show_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
 
     wb_data["size_table"] = cat_item.get("size_table", [])
-    wb_data["tryon_photo"] = cat_item.get("tryon_photo", 3)
+    wb_data["tryon_photo"] = cat_item.get("tryon_photo", "tryon")
     context.user_data["selected_product"] = wb_data
 
     price_text = f"💰 Цена: *{wb_data['price']} ₽*\n" if wb_data["price"] else ""
