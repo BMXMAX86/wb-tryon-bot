@@ -1,5 +1,8 @@
 import os
 import json
+import time
+import asyncio
+import datetime
 import logging
 import requests
 import base64
@@ -26,6 +29,8 @@ from support import (
 
 BOT_TOKEN         = os.environ.get("BOT_TOKEN", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+FASHN_API_KEY     = os.environ.get("FASHN_API_KEY", "")      # виртуальная примерка (FASHN)
+TRYON_DAILY_LIMIT = int(os.environ.get("TRYON_DAILY_LIMIT", "5"))  # примерок на человека в день
 PRODUCTS_FILE     = "products.json"
 
 # Фото бренда для приветствия (ссылка на фото с WB или прямая ссылка)
@@ -405,6 +410,127 @@ def virtual_tryon(user_photo_bytes, product_image_bytes, product_name, size_info
         logger.error(f"Ошибка примерки: {e}")
         return None
 
+# ─── Виртуальная примерка через FASHN ────────────────────────────────────────
+
+FASHN_URL = "https://api.fashn.ai/v1"
+
+
+def _fashn_headers():
+    return {"Authorization": f"Bearer {FASHN_API_KEY}", "Content-Type": "application/json"}
+
+
+def _fashn_json(resp):
+    if not resp.ok:
+        raise RuntimeError(f"FASHN HTTP {resp.status_code}: {resp.text[:200]}")
+    return resp.json()
+
+
+def fashn_credits():
+    """Остаток кредитов (для проверки ключа при запуске)."""
+    return _fashn_json(requests.get(f"{FASHN_URL}/credits", headers=_fashn_headers(), timeout=15))
+
+
+def to_jpeg(data):
+    """webp/png -> jpeg (если доступен Pillow), иначе как есть."""
+    try:
+        from PIL import Image
+        out = BytesIO()
+        Image.open(BytesIO(data)).convert("RGB").save(out, "JPEG", quality=92)
+        return out.getvalue()
+    except Exception as e:
+        logger.warning(f"Конвертация в JPEG не выполнена: {e}")
+        return data
+
+
+def to_data_uri(data):
+    return f"data:{image_media_type(data)};base64,{base64.b64encode(data).decode()}"
+
+
+def fashn_tryon(person_bytes, garment_bytes):
+    """Отправляет фото клиента и фото топа в FASHN, возвращает байты готовой картинки."""
+    payload = {
+        "model_name": "tryon-v1.6",
+        "inputs": {
+            "model_image": to_data_uri(person_bytes),
+            "garment_image": to_data_uri(to_jpeg(garment_bytes)),
+            "category": "tops",
+        },
+    }
+    job = _fashn_json(requests.post(f"{FASHN_URL}/run", json=payload, headers=_fashn_headers(), timeout=60))
+    job_id = job["id"]
+    for _ in range(45):                      # ждём до ~90 секунд
+        time.sleep(2)
+        data = _fashn_json(requests.get(f"{FASHN_URL}/status/{job_id}", headers=_fashn_headers(), timeout=20))
+        status = data.get("status")
+        if status == "completed":
+            img = requests.get(data["output"][0], timeout=30)
+            img.raise_for_status()
+            return img.content
+        if status == "failed":
+            raise RuntimeError(f"FASHN: {data.get('error')}")
+    raise TimeoutError("FASHN: слишком долго")
+
+
+def _result_rows(buy_label, buy_url, extra_rows, size_info):
+    label = buy_label or f"💛 Купить размер {size_info['intl']} на Wildberries"
+    return [
+        [InlineKeyboardButton(label, url=buy_url)],
+        *extra_rows,
+        [InlineKeyboardButton("✨ Подобрать другой топ", callback_data="back_to_catalog")],
+        home_row(),
+    ]
+
+
+async def _run_tryon(bot, chat_id, user_id, photo_bytes, product, size_info, measurements,
+                     buy_url, buy_label, extra_rows):
+    """Фоновая примерка: картинка от FASHN + короткий совет стилиста от Claude."""
+    try:
+        article = product["article"]
+        n = product.get("tryon_photo", 3)
+        garment = (await asyncio.to_thread(get_github_photo, article, n)
+                   or await asyncio.to_thread(get_github_photo, article, 1)
+                   or await asyncio.to_thread(download_image, product["image_url"]))
+
+        async def run_fashn():
+            if not (FASHN_API_KEY and garment):
+                return None
+            try:
+                return await asyncio.to_thread(fashn_tryon, photo_bytes, garment)
+            except Exception as e:
+                logger.error(f"FASHN: {e}")
+                return None
+
+        async def run_claude():
+            if not (ANTHROPIC_API_KEY and garment):
+                return None
+            return await asyncio.to_thread(
+                virtual_tryon, photo_bytes, garment, product["name"], size_info, measurements)
+
+        result, analysis = await asyncio.gather(run_fashn(), run_claude())
+        logger.info(f"примерка клиента {user_id}: картинка={'да' if result else 'нет'}, совет={'да' if analysis else 'нет'}")
+
+        caption = f"👗 {product['name']}\n📐 Твой размер: {size_info['intl']} ({size_info['ru']})"
+        if analysis:
+            caption += "\n\n" + analysis
+        keyboard = InlineKeyboardMarkup(_result_rows(buy_label, buy_url, extra_rows, size_info))
+        if result:
+            await bot.send_photo(chat_id=chat_id, photo=BytesIO(result), caption=caption[:1000],
+                                 reply_markup=keyboard)
+        else:
+            if not analysis:
+                caption += "\n\n⚠️ Примерка сейчас недоступна, но размер подобран — жми «Купить» 💛"
+            await bot.send_message(chat_id=chat_id, text=caption[:4000], reply_markup=keyboard)
+    except Exception as e:
+        logger.error(f"Ошибка примерки: {e}")
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="Что-то пошло не так 😔 Попробуй ещё раз чуть позже.",
+                reply_markup=InlineKeyboardMarkup([home_row()]),
+            )
+        except Exception:
+            pass
+
 # ─── Отправка каталога (каждый товар = карточка с фото) ──────────────────────
 
 async def send_catalog(update_or_message, context, is_callback=False):
@@ -515,6 +641,7 @@ async def show_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
 
     wb_data["size_table"] = cat_item.get("size_table", [])
+    wb_data["tryon_photo"] = cat_item.get("tryon_photo", 3)
     context.user_data["selected_product"] = wb_data
 
     price_text = f"💰 Цена: *{wb_data['price']} ₽*\n" if wb_data["price"] else ""
@@ -678,7 +805,8 @@ async def ask_waist(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📐 *Твой размер: {size_info['intl']} (российский {size_info['ru']})*\n"
         f"{size_status}{note_text}\n\n"
         f"📸 Отправь своё фото для виртуальной примерки!\n"
-        f"_Лучше всего — фото в полный рост на светлом фоне._",
+        f"_Лучше всего — фото в полный рост на светлом фоне._\n"
+        f"_Фото используется только для примерки и передаётся сервису обработки изображений._",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(buy_label, url=buy_url)],
@@ -695,38 +823,35 @@ async def handle_user_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     size_info    = context.user_data.get("size_info")
     measurements = context.user_data.get("measurements")
     buy_url      = context.user_data.get("buy_url", "")
-    matched      = context.user_data.get("matched_size")
+    buy_label    = context.user_data.get("buy_label", "")
+    extra_rows   = context.user_data.get("extra_rows", [])
 
     if not product or not size_info:
         await update.message.reply_text("⚠️ Сначала выбери товар. Нажми /start")
         return BROWSING_CATALOG
 
-    await update.message.reply_text("✨ Анализирую образ, подожди несколько секунд...")
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
 
-    photo_bytes       = await (await update.message.photo[-1].get_file()).download_as_bytearray()
-    product_img_bytes = get_github_photo(product["article"], 1) or download_image(product["image_url"])
+    # лимит примерок на человека в день (каждая примерка стоит денег)
+    counts = context.bot_data.setdefault("tryon_counts", {})
+    key = (user_id, datetime.date.today().isoformat())
+    if FASHN_API_KEY and counts.get(key, 0) >= TRYON_DAILY_LIMIT:
+        await update.message.reply_text(
+            f"На сегодня лимит примерок ({TRYON_DAILY_LIMIT} в день) исчерпан 💛 Приходи завтра, "
+            "а размер ты уже знаешь — ссылка ниже 👇",
+            reply_markup=InlineKeyboardMarkup(_result_rows(buy_label, buy_url, extra_rows, size_info)),
+        )
+        return BROWSING_CATALOG
+    counts[key] = counts.get(key, 0) + 1
 
-    if not product_img_bytes:
-        await update.message.reply_text("❌ Не удалось загрузить фото товара.")
-        return WAITING_FOR_PHOTO
+    await update.message.reply_text("✨ Примеряю топ — это займёт около 15–30 секунд...")
+    photo_bytes = bytes(await (await update.message.photo[-1].get_file()).download_as_bytearray())
 
-    analysis = virtual_tryon(bytes(photo_bytes), product_img_bytes, product["name"], size_info, measurements)
-
-    size_line = f"📐 Твой размер: *{size_info['intl']} ({size_info['ru']})*"
-
-    await update.message.reply_text(
-        f"👗 *{product['name']}*\n{size_line}\n\n"
-        f"{analysis if analysis else '⚠️ Анализ недоступен. Но размер подобран — жми Купить!'}",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(
-                context.user_data.get("buy_label", f"💛 Купить размер {size_info['intl']} на Wildberries"),
-                url=buy_url
-            )],
-            *context.user_data.get("extra_rows", []),
-            [InlineKeyboardButton("✨ Подобрать другой топ", callback_data="back_to_catalog")],
-            home_row(),
-        ])
+    context.application.create_task(
+        _run_tryon(context.bot, chat_id, user_id, photo_bytes, product, size_info, measurements,
+                   buy_url, buy_label, extra_rows),
+        update=update,
     )
     return BROWSING_CATALOG
 
@@ -788,6 +913,13 @@ def main():
         logger.warning("MANAGER_CHAT_ID не задан — связь с менеджером отключена")
     app.add_handler(CommandHandler("id", id_command))
 
+    if FASHN_API_KEY:
+        try:
+            logger.info(f"FASHN: ключ принят, баланс: {fashn_credits()}")
+        except Exception as e:
+            logger.error(f"FASHN: ключ не работает: {e}")
+    else:
+        logger.warning("FASHN_API_KEY не задан — примерка по фото отключена")
     logger.info("Бот запущен!")
     app.run_polling(drop_pending_updates=True)
 
