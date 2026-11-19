@@ -594,10 +594,13 @@ async def ask_waist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"📐 *Твой размер: {size_info['intl']} (российский {size_info['ru']})*\n"
         f"{size_status}{note_text}\n\n"
-        f"Нажми кнопку ниже — откроется нужный размер на Wildberries 💛",
+        f"💛 «Купить» откроет нужный размер на Wildberries.\n"
+        f"👗 «Примерить» откроет ту же страницу: в приложении WB нажми «Посмотреть вещь на себе» "
+        f"и загрузи своё фото (эта функция есть только в приложении).",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(buy_label, url=buy_url)],
+            [InlineKeyboardButton("👗 Примерить на Wildberries", url=buy_url)],
             *extra_rows,
             [InlineKeyboardButton("🔙 Выбрать другой топ", callback_data="back_to_catalog")],
             home_row(),
