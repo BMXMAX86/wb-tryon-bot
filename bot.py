@@ -16,6 +16,12 @@ from telegram.ext import (
     ConversationHandler,
 )
 
+from support import (
+    MAIN_MENU, SUPPORT, manager_id, home_row, send_main_menu,
+    go_main_menu, ask_support, end_support, client_message,
+    manager_reply, manager_close, id_command,
+)
+
 # ─── Настройки ────────────────────────────────────────────────────────────────
 
 BOT_TOKEN         = os.environ.get("BOT_TOKEN", "")
@@ -407,15 +413,15 @@ async def send_catalog(update_or_message, context, is_callback=False):
         chat_id = update_or_message.effective_chat.id
         bot     = context.bot
 
-    await bot.send_message(chat_id=chat_id, text="👇 Выбери товар — нажми *Примерить* под карточкой:", parse_mode="Markdown")
+    await bot.send_message(chat_id=chat_id, text="Вот наши топы 💛 Нажми «Примерить» под понравившимся — подберу размер и покажу, как он сядет ✨", parse_mode="Markdown")
 
     for p in products:
         article     = p["article"]
         photo_nums  = p.get("photos", [1])
         wb_url      = f"https://www.wildberries.ru/catalog/{article}/detail.aspx"
         keyboard    = InlineKeyboardMarkup([
-            [InlineKeyboardButton("👗 Примерить", callback_data=f"product_{p['id']}")],
-            [InlineKeyboardButton("🛒 Купить на WB", url=wb_url)],
+            [InlineKeyboardButton("✨ Примерить этот топ", callback_data=f"product_{p['id']}")],
+            [InlineKeyboardButton("🛍 Смотреть на Wildberries", url=wb_url)],
         ])
 
         # Скачиваем все доступные фото из папки photos на GitHub
@@ -462,38 +468,20 @@ async def send_catalog(update_or_message, context, is_callback=False):
                 reply_markup=keyboard
             )
 
+    await bot.send_message(
+        chat_id=chat_id,
+        text="Выбери топ выше 👆 или вернись в меню",
+        reply_markup=InlineKeyboardMarkup([home_row()])
+    )
+
 # ─── Handlers ─────────────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
 
-    # Приветственное фото — берём из первого товара в products.json
-    cover_img = None
-    try:
-        cover_img = get_github_photo(load_products()[0]["article"], 1)
-    except Exception:
-        pass
-
-    welcome_text = (
-        "👋 Привет! Я бот бренда *Easy Style*.\n\n"
-        "Помогу тебе:\n"
-        "📐 Подобрать правильный размер\n"
-        "👗 Виртуально примерить топ\n"
-        "🛒 Перейти к покупке на Wildberries\n\n"
-        "Выбери топ из каталога ниже 👇"
-    )
-
-    if cover_img:
-        await update.message.reply_photo(
-            photo=BytesIO(cover_img),
-            caption=welcome_text,
-            parse_mode="Markdown"
-        )
-    else:
-        await update.message.reply_text(welcome_text, parse_mode="Markdown")
-
-    await send_catalog(update, context, is_callback=False)
-    return BROWSING_CATALOG
+    # Приветствие с логотипом и главное меню
+    await send_main_menu(context.bot, update.effective_chat.id, context, with_logo=True)
+    return MAIN_MENU
 
 
 async def show_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -535,7 +523,8 @@ async def show_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Введи свой *рост* (в см), например: `170`",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("◀️ Назад к каталогу", callback_data="back_to_catalog")],
+            [InlineKeyboardButton("🔙 Выбрать другой топ", callback_data="back_to_catalog")],
+            home_row(),
         ])
     )
     return ASKING_HEIGHT
@@ -626,7 +615,7 @@ async def ask_waist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     avail      = {s: get_size_availability(article, s) for s in sizes_order}
     state      = avail.get(wanted)
     buy_url    = size_url(article, wanted)
-    buy_label  = f"🛒 Купить {wanted} на WB"
+    buy_label  = f"💛 Купить {wanted} на Wildberries"
     extra_rows = []
 
     if state is True:
@@ -641,7 +630,7 @@ async def ask_waist(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if in_stock:
             alt       = in_stock[0]
             buy_url   = size_url(article, alt)
-            buy_label = f"🛒 Купить {alt} на WB"
+            buy_label = f"💛 Купить {alt} на Wildberries"
             have      = ", ".join(s for s in sizes_order if avail.get(s) is True)
             size_status = (
                 f"⚠️ Размер *{wanted}* на этой модели закончился.\n"
@@ -649,7 +638,7 @@ async def ask_waist(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             buy_url   = base_url
-            buy_label = "🛒 Открыть товар на WB"
+            buy_label = "🛍 Открыть товар на Wildberries"
             size_status = f"❌ На этой модели размер *{wanted}* и остальные размеры сейчас закончились."
 
         # другие модели, где нужный размер есть в наличии
@@ -686,7 +675,8 @@ async def ask_waist(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(buy_label, url=buy_url)],
             *extra_rows,
-            [InlineKeyboardButton("◀️ Назад к каталогу", callback_data="back_to_catalog")],
+            [InlineKeyboardButton("🔙 Выбрать другой топ", callback_data="back_to_catalog")],
+            home_row(),
         ])
     )
     return WAITING_FOR_PHOTO
@@ -722,11 +712,12 @@ async def handle_user_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(
-                context.user_data.get("buy_label", f"🛒 Купить размер {size_info['intl']} на WB"),
+                context.user_data.get("buy_label", f"💛 Купить размер {size_info['intl']} на Wildberries"),
                 url=buy_url
             )],
             *context.user_data.get("extra_rows", []),
-            [InlineKeyboardButton("👗 Выбрать другой товар", callback_data="back_to_catalog")],
+            [InlineKeyboardButton("✨ Подобрать другой топ", callback_data="back_to_catalog")],
+            home_row(),
         ])
     )
     return BROWSING_CATALOG
@@ -751,27 +742,42 @@ def main():
         raise SystemExit("BOT_TOKEN не задан: добавь переменную BOT_TOKEN в Variables на Railway")
     app = Application.builder().token(BOT_TOKEN).build()
 
+    common = [
+        CallbackQueryHandler(go_main_menu, pattern="^menu_main$"),
+        CallbackQueryHandler(back_to_catalog, pattern="^menu_catalog$"),
+        CallbackQueryHandler(ask_support, pattern="^menu_support$"),
+        CallbackQueryHandler(end_support, pattern="^support_done$"),
+    ]
+    back = CallbackQueryHandler(back_to_catalog, pattern="^back_to_catalog$")
+
     conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+        entry_points=[CommandHandler("start", start)] + common + [back],
         states={
-            BROWSING_CATALOG: [
-                CallbackQueryHandler(show_product, pattern=r"^product_\d+$"),
-                CallbackQueryHandler(back_to_catalog, pattern="^back_to_catalog$"),
-            ],
-            ASKING_HEIGHT: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_height)],
-            ASKING_WEIGHT: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_weight)],
-            ASKING_CHEST:  [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_chest)],
-            ASKING_WAIST:  [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_waist)],
+            MAIN_MENU: common,
+            BROWSING_CATALOG: [CallbackQueryHandler(show_product, pattern=r"^product_\d+$"), back] + common,
+            ASKING_HEIGHT: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_height), back] + common,
+            ASKING_WEIGHT: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_weight), back] + common,
+            ASKING_CHEST:  [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_chest), back] + common,
+            ASKING_WAIST:  [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_waist), back] + common,
             WAITING_FOR_PHOTO: [
                 MessageHandler(filters.PHOTO, handle_user_photo),
-                CallbackQueryHandler(back_to_catalog, pattern="^back_to_catalog$"),
                 CallbackQueryHandler(show_product, pattern=r"^product_\d+$"),
-            ],
+                back,
+            ] + common,
+            SUPPORT: [MessageHandler(~filters.COMMAND & filters.ChatType.PRIVATE, client_message)] + common,
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[CommandHandler("start", start), CommandHandler("cancel", cancel)],
     )
-
     app.add_handler(conv)
+
+    mgr = manager_id()
+    if mgr:
+        app.add_handler(MessageHandler(filters.Chat(chat_id=mgr) & filters.REPLY & ~filters.COMMAND, manager_reply), group=-1)
+        app.add_handler(CommandHandler("close", manager_close, filters=filters.Chat(chat_id=mgr) & filters.REPLY), group=-1)
+    else:
+        logger.warning("MANAGER_CHAT_ID не задан — связь с менеджером отключена")
+    app.add_handler(CommandHandler("id", id_command))
+
     logger.info("Бот запущен!")
     app.run_polling(drop_pending_updates=True)
 
