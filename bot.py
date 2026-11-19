@@ -843,10 +843,21 @@ async def handle_user_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(_result_rows(buy_label, buy_url, extra_rows, size_info)),
         )
         return BROWSING_CATALOG
-    counts[key] = counts.get(key, 0) + 1
 
     await update.message.reply_text("✨ Примеряю топ — это займёт около 15–30 секунд...")
-    photo_bytes = bytes(await (await update.message.photo[-1].get_file()).download_as_bytearray())
+    photo_bytes = None
+    for attempt in range(3):
+        try:
+            tg_file = await update.message.photo[-1].get_file()
+            photo_bytes = bytes(await tg_file.download_as_bytearray())
+            break
+        except Exception as e:
+            logger.error(f"Не удалось скачать фото клиента (попытка {attempt + 1}): {e}")
+            await asyncio.sleep(1)
+    if not photo_bytes:
+        await update.message.reply_text("Не получилось загрузить фото 😔 Отправь его ещё раз, пожалуйста.")
+        return WAITING_FOR_PHOTO
+    counts[key] = counts.get(key, 0) + 1
 
     context.application.create_task(
         _run_tryon(context.bot, chat_id, user_id, photo_bytes, product, size_info, measurements,
@@ -870,10 +881,26 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ─── Запуск ───────────────────────────────────────────────────────────────────
 
+async def on_error(update, context):
+    """Ошибки обработчиков: в лог с трассировкой и короткое сообщение клиенту."""
+    logger.error(f"Ошибка обработчика: {context.error!r}", exc_info=context.error)
+    if isinstance(update, Update) and update.effective_chat:
+        try:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="Что-то пошло не так 😔 Попробуй ещё раз или нажми /start",
+            )
+        except Exception:
+            pass
+
+
 def main():
     if not BOT_TOKEN:
         raise SystemExit("BOT_TOKEN не задан: добавь переменную BOT_TOKEN в Variables на Railway")
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = (Application.builder().token(BOT_TOKEN)
+           .read_timeout(30).write_timeout(30).connect_timeout(15).pool_timeout(15)
+           .build())
+    app.add_error_handler(on_error)
 
     common = [
         CallbackQueryHandler(go_main_menu, pattern="^menu_main$"),
