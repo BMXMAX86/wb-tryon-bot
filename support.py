@@ -22,9 +22,9 @@ LOGO_FILES    = ["logo.jpg", "logo.png", "logo.jpeg", "logo.webp", "IMG_6447.JPG
 
 WELCOME_TEXT = (
     "Привет! 👋 Я бот бренда *Easy Style* 💛\n\n"
-    "Помогу подобрать идеальный топ и размер, покажу, как он сядет, "
-    "и сразу дам ссылку на Wildberries. А если что-то пойдёт не так с заказом — "
-    "позову менеджера.\n\n"
+    "Помогу подобрать размер топа и сразу дам ссылку на Wildberries. "
+    "А если что-то пойдёт не так с заказом или нужно задать вопрос о ваших данных — "
+    "нажмите «💬 Вопрос по заказу», и подключится менеджер.\n\n"
     "Что хочешь сделать? 👇"
 )
 MENU_TEXT = "Что хочешь сделать дальше? 👇"
@@ -58,7 +58,6 @@ def menu_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🛍 Выбрать новый топ", callback_data="menu_catalog")],
         [InlineKeyboardButton("💬 Вопрос по заказу", callback_data="menu_support")],
-        [InlineKeyboardButton("🛡 Мои данные", callback_data="menu_privacy")],
     ])
 
 
@@ -206,7 +205,7 @@ async def client_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=manager_keyboard(user.id),
         )
         relay[copied.message_id] = user.id
-        logger.info(f"клиент {user.id} -> менеджеру (карточка {card_id})")
+        logger.info("клиент -> менеджеру: сообщение передано")
     except Exception as e:
         logger.error(f"Не удалось передать сообщение менеджеру: {e}")
         await msg.reply_text(SUPPORT_OFF, reply_markup=menu_keyboard())
@@ -266,7 +265,7 @@ async def manager_reply_button(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     client_id = int(query.data.split(":")[1])
     context.user_data["reply_to"] = client_id
-    logger.info(f"менеджер включил режим ответа клиенту {client_id}")
+    logger.info("менеджер включил режим ответа")
     await query.answer("Пишите ответ — он уйдёт клиенту")
     await context.bot.send_message(
         chat_id=query.message.chat_id,
@@ -294,11 +293,11 @@ async def manager_close_button(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         await context.bot.send_message(chat_id=client_id, text=SUPPORT_CLOSED,
                                        reply_markup=menu_keyboard())
-        logger.info(f"менеджер закрыл диалог с клиентом {client_id}")
+        logger.info("менеджер закрыл диалог")
         await query.answer("Диалог закрыт")
         await context.bot.send_message(chat_id=query.message.chat_id, text="Диалог закрыт ✅")
     except Exception as e:
-        logger.error(f"Не удалось закрыть диалог с {client_id}: {e}")
+        logger.error(f"Не удалось закрыть диалог: {e}")
         await query.answer("Не получилось уведомить клиента", show_alert=True)
 
 
@@ -309,7 +308,7 @@ async def manager_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     client_id = _client_for(context, target) if target else None
     if not client_id:
         client_id = context.user_data.get("reply_to")
-    logger.info(f"сообщение менеджера: reply={bool(target)} клиент={client_id}")
+    logger.info(f"сообщение менеджера: reply={bool(target)}, клиент найден={bool(client_id)}")
     if not client_id:
         if target:
             await msg.reply_text(
@@ -318,10 +317,10 @@ async def manager_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     try:
         await _send_to_client(context, client_id, msg)
-        logger.info(f"менеджер -> клиенту {client_id}: доставлено")
+        logger.info("менеджер -> клиенту: доставлено")
         await msg.reply_text("✅ Отправлено клиенту", disable_notification=True)
     except Exception as e:
-        logger.error(f"Не удалось отправить ответ клиенту {client_id}: {e}")
+        logger.error(f"Не удалось отправить ответ клиенту: {e}")
         await msg.reply_text(f"Не получилось отправить клиенту: {e}")
 
 
@@ -340,7 +339,7 @@ async def manager_close(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                        reply_markup=menu_keyboard())
         await msg.reply_text("Диалог закрыт ✅")
     except Exception as e:
-        logger.error(f"Не удалось закрыть диалог с {client_id}: {e}")
+        logger.error(f"Не удалось закрыть диалог: {e}")
         await msg.reply_text(f"Не получилось уведомить клиента: {e}")
 
 

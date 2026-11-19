@@ -1,11 +1,7 @@
 import os
 import json
-import time
-import asyncio
-import datetime
 import logging
 import requests
-import base64
 from io import BytesIO
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
@@ -24,18 +20,10 @@ from support import (
     go_main_menu, ask_support, end_support, client_message,
     manager_message, manager_reply_button, manager_close_button, manager_close, id_command,
 )
-from consent import (
-    ask_consent, has_consent, grant_consent, consent_doc, privacy_menu, privacy_cmd,
-    privacy_revoke, privacy_delete, init_db, legal_missing, DB_PATH, PERSISTENT,
-)
 
 # ─── Настройки ────────────────────────────────────────────────────────────────
 
 BOT_TOKEN         = os.environ.get("BOT_TOKEN", "")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-FASHN_API_KEY     = os.environ.get("FASHN_API_KEY", "")      # виртуальная примерка (FASHN)
-TRYON_DAILY_LIMIT = int(os.environ.get("TRYON_DAILY_LIMIT", "5"))  # примерок на человека в день
-STYLIST_ADVICE    = os.environ.get("STYLIST_ADVICE", "") == "1"    # совет стилиста от Claude (передаёт фото в Anthropic)
 PRODUCTS_FILE     = "products.json"
 
 # Фото бренда для приветствия (ссылка на фото с WB или прямая ссылка)
@@ -44,11 +32,8 @@ BRAND_COVER_ARTICLE = "982153895"
 
 # Состояния диалога
 BROWSING_CATALOG  = 1
-ASKING_HEIGHT     = 2
-ASKING_WEIGHT     = 3
 ASKING_CHEST      = 4
 ASKING_WAIST      = 5
-WAITING_FOR_PHOTO = 6
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -363,180 +348,6 @@ def get_github_photo(article, n=1):
     return None
 
 
-def image_media_type(data):
-    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "image/webp"
-    if data[:8] == b"\x89PNG\r\n\x1a\n":
-        return "image/png"
-    return "image/jpeg"
-
-# ─── Виртуальная примерка ─────────────────────────────────────────────────────
-
-def virtual_tryon(user_photo_bytes, product_image_bytes, product_name, size_info, measurements):
-    try:
-        payload = {
-            "model": "claude-sonnet-4-6",
-            "max_tokens": 1024,
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": (
-                            f"Посмотри на эти два изображения. "
-                            f"Первое — фото человека, второе — товар '{product_name}'. "
-                            f"Размер: {size_info['intl']} (российский {size_info['ru']}). "
-                            f"Параметры: грудь {measurements['chest']} см, талия {measurements['waist']} см, "
-                            f"рост {measurements['height']} см, вес {measurements['weight']} кг. "
-                            f"Опиши позитивно как товар будет смотреться, прокомментируй посадку, "
-                            f"дай 1-2 совета по сочетанию. По-русски, как стилист. Не более 5 предложений."
-                        )
-                    },
-                    {"type": "image", "source": {"type": "base64", "media_type": image_media_type(user_photo_bytes),
-                                                  "data": base64.b64encode(user_photo_bytes).decode()}},
-                    {"type": "image", "source": {"type": "base64", "media_type": image_media_type(product_image_bytes),
-                                                  "data": base64.b64encode(product_image_bytes).decode()}},
-                ]
-            }]
-        }
-        resp = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            json=payload,
-            headers={
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json"
-            },
-            timeout=30
-        )
-        resp.raise_for_status()
-        return resp.json()["content"][0]["text"]
-    except Exception as e:
-        logger.error(f"Ошибка примерки: {e}")
-        return None
-
-# ─── Виртуальная примерка через FASHN ────────────────────────────────────────
-
-FASHN_URL = "https://api.fashn.ai/v1"
-
-
-def _fashn_headers():
-    return {"Authorization": f"Bearer {FASHN_API_KEY}", "Content-Type": "application/json"}
-
-
-def _fashn_json(resp):
-    if not resp.ok:
-        raise RuntimeError(f"FASHN HTTP {resp.status_code}: {resp.text[:200]}")
-    return resp.json()
-
-
-def fashn_credits():
-    """Остаток кредитов (для проверки ключа при запуске)."""
-    return _fashn_json(requests.get(f"{FASHN_URL}/credits", headers=_fashn_headers(), timeout=15))
-
-
-def to_jpeg(data):
-    """webp/png -> jpeg (если доступен Pillow), иначе как есть."""
-    try:
-        from PIL import Image
-        out = BytesIO()
-        Image.open(BytesIO(data)).convert("RGB").save(out, "JPEG", quality=92)
-        return out.getvalue()
-    except Exception as e:
-        logger.warning(f"Конвертация в JPEG не выполнена: {e}")
-        return data
-
-
-def to_data_uri(data):
-    return f"data:{image_media_type(data)};base64,{base64.b64encode(data).decode()}"
-
-
-def fashn_tryon(person_bytes, garment_bytes):
-    """Отправляет фото клиента и фото топа в FASHN, возвращает байты готовой картинки."""
-    payload = {
-        "model_name": "tryon-v1.6",
-        "inputs": {
-            "model_image": to_data_uri(person_bytes),
-            "garment_image": to_data_uri(to_jpeg(garment_bytes)),
-            "category": "tops",
-            "mode": "quality",
-        },
-    }
-    job = _fashn_json(requests.post(f"{FASHN_URL}/run", json=payload, headers=_fashn_headers(), timeout=60))
-    job_id = job["id"]
-    for _ in range(45):                      # ждём до ~90 секунд
-        time.sleep(2)
-        data = _fashn_json(requests.get(f"{FASHN_URL}/status/{job_id}", headers=_fashn_headers(), timeout=20))
-        status = data.get("status")
-        if status == "completed":
-            img = requests.get(data["output"][0], timeout=30)
-            img.raise_for_status()
-            return img.content
-        if status == "failed":
-            raise RuntimeError(f"FASHN: {data.get('error')}")
-    raise TimeoutError("FASHN: слишком долго")
-
-
-def _result_rows(buy_label, buy_url, extra_rows, size_info):
-    label = buy_label or f"💛 Купить размер {size_info['intl']} на Wildberries"
-    return [
-        [InlineKeyboardButton(label, url=buy_url)],
-        *extra_rows,
-        [InlineKeyboardButton("✨ Подобрать другой топ", callback_data="back_to_catalog")],
-        home_row(),
-    ]
-
-
-async def _run_tryon(bot, chat_id, user_id, photo_bytes, product, size_info, measurements,
-                     buy_url, buy_label, extra_rows):
-    """Фоновая примерка: картинка от FASHN + короткий совет стилиста от Claude."""
-    try:
-        article = product["article"]
-        n = product.get("tryon_photo", "tryon")
-        garment = (await asyncio.to_thread(get_github_photo, article, n)
-                   or await asyncio.to_thread(get_github_photo, article, 1)
-                   or await asyncio.to_thread(download_image, product["image_url"]))
-
-        async def run_fashn():
-            if not (FASHN_API_KEY and garment):
-                return None
-            try:
-                return await asyncio.to_thread(fashn_tryon, photo_bytes, garment)
-            except Exception as e:
-                logger.error(f"FASHN: {e}")
-                return None
-
-        async def run_claude():
-            if not (ANTHROPIC_API_KEY and STYLIST_ADVICE and garment):
-                return None
-            return await asyncio.to_thread(
-                virtual_tryon, photo_bytes, garment, product["name"], size_info, measurements)
-
-        result, analysis = await asyncio.gather(run_fashn(), run_claude())
-        logger.info(f"примерка клиента {user_id}: картинка={'да' if result else 'нет'}, совет={'да' if analysis else 'нет'}")
-
-        caption = f"👗 {product['name']}\n📐 Твой размер: {size_info['intl']} ({size_info['ru']})"
-        if analysis:
-            caption += "\n\n" + analysis
-        keyboard = InlineKeyboardMarkup(_result_rows(buy_label, buy_url, extra_rows, size_info))
-        if result:
-            await bot.send_photo(chat_id=chat_id, photo=BytesIO(result), caption=caption[:1000],
-                                 reply_markup=keyboard)
-        else:
-            if not analysis:
-                caption += "\n\n⚠️ Примерка сейчас недоступна, но размер подобран — жми «Купить» 💛"
-            await bot.send_message(chat_id=chat_id, text=caption[:4000], reply_markup=keyboard)
-    except Exception as e:
-        logger.error(f"Ошибка примерки: {e}")
-        try:
-            await bot.send_message(
-                chat_id=chat_id,
-                text="Что-то пошло не так 😔 Попробуй ещё раз чуть позже.",
-                reply_markup=InlineKeyboardMarkup([home_row()]),
-            )
-        except Exception:
-            pass
-
 # ─── Отправка каталога (каждый товар = карточка с фото) ──────────────────────
 
 async def send_catalog(update_or_message, context, is_callback=False):
@@ -549,14 +360,14 @@ async def send_catalog(update_or_message, context, is_callback=False):
     else:
         chat_id = update_or_message.effective_chat.id
 
-    await bot.send_message(chat_id=chat_id, text="Вот наши топы 💛 Нажми «Примерить» под понравившимся — подберу размер и покажу, как он сядет ✨", parse_mode="Markdown")
+    await bot.send_message(chat_id=chat_id, text="Вот наши топы 💛 Нажми «Подобрать размер» под понравившимся — подберу размер и дам ссылку на Wildberries ✨", parse_mode="Markdown")
 
     for p in products:
         article     = p["article"]
         photo_nums  = p.get("photos", [1])
         wb_url      = f"https://www.wildberries.ru/catalog/{article}/detail.aspx"
         keyboard    = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✨ Примерить этот топ", callback_data=f"product_{p['id']}")],
+            [InlineKeyboardButton("📏 Подобрать размер", callback_data=f"product_{p['id']}")],
             [InlineKeyboardButton("🛍 Смотреть на Wildberries", url=wb_url)],
         ])
 
@@ -624,39 +435,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return MAIN_MENU
 
 
-async def consent_yes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Пользователь согласился на обработку фото — сохраняем и продолжаем примерку."""
-    query = update.callback_query
-    if not grant_consent(update.effective_user.id):
-        await query.answer("Не удалось сохранить согласие. Попробуй чуть позже.", show_alert=True)
-        return None
-    await query.answer("Спасибо! Согласие сохранено ✅")
-    product_id = int(query.data.split(":")[1])
-    if product_id > 0:
-        return await _begin_product(query, context, product_id)
-    await context.bot.send_message(chat_id=query.message.chat_id, text="Спасибо! Теперь отправь своё фото 📸")
-    return WAITING_FOR_PHOTO
-
-
-async def consent_no(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """«Продолжить без примерки» — возвращаем в каталог без ограничений."""
-    return await back_to_catalog(update, context)
-
-
 async def show_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Вход в примерку: сначала согласие на обработку фото (один раз), затем сбор параметров."""
+    """Начинает подбор размера после нажатия «Подобрать размер»."""
     query = update.callback_query
     await query.answer()
 
     product_id = int(query.data.replace("product_", ""))
-    if not has_consent(update.effective_user.id):
-        await ask_consent(context.bot, query.message.chat_id, product_id)
-        return BROWSING_CATALOG
     return await _begin_product(query, context, product_id)
 
 
 async def _begin_product(query, context, product_id):
-    """Начинает сбор параметров после нажатия «Примерить»."""
+    """Начинает сбор мерок для подбора размера."""
     catalog    = load_products()
     cat_item   = next((p for p in catalog if p["id"] == product_id), None)
     if not cat_item:
@@ -674,7 +463,6 @@ async def _begin_product(query, context, product_id):
         }
 
     wb_data["size_table"] = cat_item.get("size_table", [])
-    wb_data["tryon_photo"] = cat_item.get("tryon_photo", "tryon")
     context.user_data["selected_product"] = wb_data
 
     price_text = f"💰 Цена: *{wb_data['price']} ₽*\n" if wb_data["price"] else ""
@@ -688,39 +476,13 @@ async def _begin_product(query, context, product_id):
         f"{price_text}"
         f"{sizes_text}\n"
         f"📏 Подберём твой размер!\n\n"
-        f"Введи свой *рост* (в см), например: `170`",
+        f"Введи обхват *груди* (в см), например: `88`\n\n"
+        f"_Измеряй по самому выступающему месту._",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("🔙 Выбрать другой топ", callback_data="back_to_catalog")],
             home_row(),
         ])
-    )
-    return ASKING_HEIGHT
-
-
-async def ask_height(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        height = int(update.message.text.strip())
-        if not (100 <= height <= 220): raise ValueError
-    except ValueError:
-        await update.message.reply_text("⚠️ Введи рост числом от 100 до 220 см, например: `170`", parse_mode="Markdown")
-        return ASKING_HEIGHT
-    context.user_data["height"] = height
-    await update.message.reply_text("Теперь напиши свой *вес* (в кг), например: `65`", parse_mode="Markdown")
-    return ASKING_WEIGHT
-
-
-async def ask_weight(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        weight = int(update.message.text.strip())
-        if not (30 <= weight <= 250): raise ValueError
-    except ValueError:
-        await update.message.reply_text("⚠️ Введи вес числом от 30 до 250 кг, например: `65`", parse_mode="Markdown")
-        return ASKING_WEIGHT
-    context.user_data["weight"] = weight
-    await update.message.reply_text(
-        "📏 Введи обхват *груди* (в см), например: `88`\n\n_Измеряй по самому выступающему месту._",
-        parse_mode="Markdown"
     )
     return ASKING_CHEST
 
@@ -759,11 +521,6 @@ async def ask_waist(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     size_info = calculate_size(chest, waist, size_table)
     context.user_data["size_info"]    = size_info
-    context.user_data["measurements"] = {
-        "height": context.user_data["height"],
-        "weight": context.user_data["weight"],
-        "chest": chest, "waist": waist,
-    }
 
     matched = find_size_in_wb(product.get("available_sizes", []), size_info["ru"], size_info["intl"])
     context.user_data["matched_size"] = matched
@@ -837,9 +594,7 @@ async def ask_waist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"📐 *Твой размер: {size_info['intl']} (российский {size_info['ru']})*\n"
         f"{size_status}{note_text}\n\n"
-        f"📸 Отправь своё фото для виртуальной примерки!\n"
-        f"_Лучше всего — фото в полный рост на светлом фоне._\n"
-        f"_Фото используется только для примерки и передаётся сервису обработки изображений._",
+        f"Нажми кнопку ниже — откроется нужный размер на Wildberries 💛",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(buy_label, url=buy_url)],
@@ -847,60 +602,6 @@ async def ask_waist(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🔙 Выбрать другой топ", callback_data="back_to_catalog")],
             home_row(),
         ])
-    )
-    return WAITING_FOR_PHOTO
-
-
-async def handle_user_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    product      = context.user_data.get("selected_product")
-    size_info    = context.user_data.get("size_info")
-    measurements = context.user_data.get("measurements")
-    buy_url      = context.user_data.get("buy_url", "")
-    buy_label    = context.user_data.get("buy_label", "")
-    extra_rows   = context.user_data.get("extra_rows", [])
-
-    if not product or not size_info:
-        await update.message.reply_text("⚠️ Сначала выбери товар. Нажми /start")
-        return BROWSING_CATALOG
-
-    # без действующего согласия фото не принимаем и никуда не передаём
-    if not has_consent(update.effective_user.id):
-        await ask_consent(context.bot, update.effective_chat.id, 0)
-        return BROWSING_CATALOG
-
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-
-    # лимит примерок на человека в день (каждая примерка стоит денег)
-    counts = context.bot_data.setdefault("tryon_counts", {})
-    key = (user_id, datetime.date.today().isoformat())
-    if FASHN_API_KEY and counts.get(key, 0) >= TRYON_DAILY_LIMIT:
-        await update.message.reply_text(
-            f"На сегодня лимит примерок ({TRYON_DAILY_LIMIT} в день) исчерпан 💛 Приходи завтра, "
-            "а размер ты уже знаешь — ссылка ниже 👇",
-            reply_markup=InlineKeyboardMarkup(_result_rows(buy_label, buy_url, extra_rows, size_info)),
-        )
-        return BROWSING_CATALOG
-
-    await update.message.reply_text("✨ Примеряю топ — это займёт около 15–30 секунд...")
-    photo_bytes = None
-    for attempt in range(3):
-        try:
-            tg_file = await update.message.photo[-1].get_file()
-            photo_bytes = bytes(await tg_file.download_as_bytearray())
-            break
-        except Exception as e:
-            logger.error(f"Не удалось скачать фото клиента (попытка {attempt + 1}): {e}")
-            await asyncio.sleep(1)
-    if not photo_bytes:
-        await update.message.reply_text("Не получилось загрузить фото 😔 Отправь его ещё раз, пожалуйста.")
-        return WAITING_FOR_PHOTO
-    counts[key] = counts.get(key, 0) + 1
-
-    context.application.create_task(
-        _run_tryon(context.bot, chat_id, user_id, photo_bytes, product, size_info, measurements,
-                   buy_url, buy_label, extra_rows),
-        update=update,
     )
     return BROWSING_CATALOG
 
@@ -932,6 +633,11 @@ async def on_error(update, context):
             pass
 
 
+async def removed_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Кнопка из старого сообщения: эта функция удалена."""
+    await update.callback_query.answer("Эта кнопка больше не работает. Нажми /start", show_alert=True)
+
+
 def main():
     if not BOT_TOKEN:
         raise SystemExit("BOT_TOKEN не задан: добавь переменную BOT_TOKEN в Variables на Railway")
@@ -945,34 +651,26 @@ def main():
         CallbackQueryHandler(back_to_catalog, pattern="^menu_catalog$"),
         CallbackQueryHandler(ask_support, pattern="^menu_support$"),
         CallbackQueryHandler(end_support, pattern="^support_done$"),
-        CallbackQueryHandler(consent_yes, pattern=r"^consent_yes:\d+$"),
-        CallbackQueryHandler(consent_no, pattern="^consent_no$"),
-        CallbackQueryHandler(consent_doc, pattern=r"^consent_doc:\d+$"),
-        CallbackQueryHandler(privacy_menu, pattern="^menu_privacy$"),
-        CallbackQueryHandler(privacy_revoke, pattern="^privacy_revoke$"),
-        CallbackQueryHandler(privacy_delete, pattern="^privacy_delete$"),
     ]
     back = CallbackQueryHandler(back_to_catalog, pattern="^back_to_catalog$")
 
     conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start), CommandHandler("privacy", privacy_cmd)] + common + [back],
+        entry_points=[CommandHandler("start", start)] + common + [back],
         states={
             MAIN_MENU: common,
             BROWSING_CATALOG: [CallbackQueryHandler(show_product, pattern=r"^product_\d+$"), back] + common,
-            ASKING_HEIGHT: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_height), back] + common,
-            ASKING_WEIGHT: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_weight), back] + common,
             ASKING_CHEST:  [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_chest), back] + common,
             ASKING_WAIST:  [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_waist), back] + common,
-            WAITING_FOR_PHOTO: [
-                MessageHandler(filters.PHOTO, handle_user_photo),
-                CallbackQueryHandler(show_product, pattern=r"^product_\d+$"),
-                back,
-            ] + common,
             SUPPORT: [MessageHandler(~filters.COMMAND & filters.ChatType.PRIVATE, client_message)] + common,
         },
-        fallbacks=[CommandHandler("start", start), CommandHandler("privacy", privacy_cmd), CommandHandler("cancel", cancel)],
+        fallbacks=[CommandHandler("start", start), CommandHandler("cancel", cancel)],
     )
     app.add_handler(conv)
+    # кнопки удалённой функции в старых сообщениях чатов
+    app.add_handler(CallbackQueryHandler(
+        removed_button,
+        pattern=r"^(consent_yes:\d+|consent_no|consent_doc:\d+|menu_privacy|privacy_revoke|privacy_delete)$",
+    ))
 
     mgr = manager_id()
     if mgr:
@@ -984,21 +682,6 @@ def main():
         logger.warning("MANAGER_CHAT_ID не задан — связь с менеджером отключена")
     app.add_handler(CommandHandler("id", id_command))
 
-    try:
-        init_db()
-        logger.info(f"Хранилище согласий: {DB_PATH} ({'постоянное' if PERSISTENT else 'НЕ постоянное: подключите том Railway'})")
-    except Exception as e:
-        logger.error(f"Хранилище согласий недоступно: {e}")
-    missing = legal_missing()
-    if missing:
-        logger.warning("legal.json не заполнен: " + ", ".join(missing))
-    if FASHN_API_KEY:
-        try:
-            logger.info(f"FASHN: ключ принят, баланс: {fashn_credits()}")
-        except Exception as e:
-            logger.error(f"FASHN: ключ не работает: {e}")
-    else:
-        logger.warning("FASHN_API_KEY не задан — примерка по фото отключена")
     logger.info("Бот запущен!")
     app.run_polling(drop_pending_updates=True)
 
